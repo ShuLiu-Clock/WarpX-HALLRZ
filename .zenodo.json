@@ -1,0 +1,282 @@
+{
+    "creators": [
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Vay, Jean-Luc",
+        "orcid": "0000-0002-0040-799X"
+      },
+      {
+        "affiliation": "Helion Energy, Inc.",
+        "name": "Acciarri, Marco",
+        "orcid": "0000-0003-2768-1259"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Almgren, Ann",
+        "orcid": "0000-0003-2103-312X"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Amorim, L\u00edgia Diana",
+        "orcid": "0000-0002-1445-0032"
+      },
+      {
+        "affiliation": "Laboratoire d'Optique Appliqu\u00e9e",
+        "name": "Andriyash, Igor",
+        "orcid": "0000-0003-0313-4496"
+      },
+      {
+        "affiliation": "Lawrence Livermore National Laboratory",
+        "name": "Angus, Justin Ray",
+        "orcid": "0000-0003-1474-0002"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Antoun, Thierry",
+        "orcid": "0000-0002-1003-0698"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Belkin, Daniel",
+        "orcid": "0000-0002-3936-6419"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Bizzozero, David"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Blelly, Aurore"
+      },
+      {
+        "affiliation": "Helion Energy, Inc.",
+        "name": "Clark, Stephen Eric",
+        "orcid": "0000-0002-0117-776X"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Dammak, Eya",
+        "orcid": "0009-0003-7821-3508"
+      },
+      {
+        "affiliation": "LIDYL, CEA-Universit\u00e9 Paris-Saclay, CEA Saclay",
+        "name": "Fedeli, Luca",
+        "orcid": "0000-0002-7215-4178"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Formenti, Arianna",
+        "orcid": "0000-0002-7887-9313"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Garten, Marco",
+        "orcid": "0000-0001-6994-2475"
+      },
+      {
+        "affiliation": "SLAC National Accelerator Laboratory",
+        "name": "Ge, Lixin",
+        "orcid": "0000-0002-1442-0706"
+      },
+      {
+        "affiliation": "CERN",
+        "name": "Giacomel, Lorenzo",
+        "orcid": "0000-0002-1750-9757"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Gott, Kevin",
+        "orcid": "0000-0003-3244-5525"
+      },
+      {
+        "affiliation": "TAE Technologies Inc.",
+        "name": "Groenewald, Roelof E.",
+        "orcid": "0000-0002-5282-7152"
+      },
+      {
+        "affiliation": "Lawrence Livermore National Laboratory",
+        "name": "Grote, David",
+        "orcid": "0000-0002-4057-8582"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Gu, Junmin",
+        "orcid": "0000-0002-1521-8534"
+      },
+      {
+        "affiliation": "Lawrence Livermore National Laboratory",
+        "name": "Harrison, Cyrus",
+        "orcid": "0000-0001-8985-0906"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Haseeb, Muhammad",
+        "orcid": "0000-0002-0697-6894"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Huebl, Axel",
+        "orcid": "0000-0003-1943-7141"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Jambunathan, Revathi",
+        "orcid": "0000-0001-9432-2091"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Kara-Mostefa, Ilian",
+        "orcid": "0009-0002-2736-5942"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Klion, Hannah",
+        "orcid": "0000-0003-2095-4293"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Kumar, Prabhat",
+        "orcid": "0000-0002-8454-7497"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Lehe, Remi",
+        "orcid": "0000-0002-3656-9659"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Loring, Burlen",
+        "orcid": "0000-0002-4678-8142"
+      },
+      {
+        "affiliation": "University of Michigan",
+        "name": "Marks, Thomas",
+        "orcid": "0000-0003-3614-6127"
+      },
+      {
+        "affiliation": "Intense Computing",
+        "name": "Miller, Phil",
+        "orcid": "0000-0001-5772-3654"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Myers, Andrew",
+        "orcid": "0000-0001-8427-8330"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Pech, Juliette",
+        "orcid": "0009-0008-6165-0708"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Rheaume, Elisa",
+        "orcid": "0000-0002-6710-0650"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Richardson, Glenn",
+        "orcid": "0000-0003-0313-4496"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Rowan, Michael E.",
+        "orcid": "0000-0003-2406-1273"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Sandberg, Ryan Thor",
+        "orcid": "0000-0001-7680-8733"
+      },
+      {
+        "affiliation": "Modern Electron",
+        "name": "Scherpelz, Peter",
+        "orcid": "0000-0001-8185-3387"
+      },
+      {
+        "affiliation": "Deutsches Elektronen-Synchrotron DESY",
+        "name": "Sinn, Alexander",
+        "orcid": "0000-0002-4485-971X"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Shapoval, Olga",
+        "orcid": "0000-0003-4003-4507"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Terzani, Davide",
+        "orcid": "0000-0002-0105-5420"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory, now DESY",
+        "name": "Th\u00e9venet, Maxence",
+        "orcid": "0000-0001-7216-2277"
+      },
+      {
+        "affiliation": "Laboratory for Laser Energetics, University of Rochester",
+        "name": "Weichman, Kale",
+        "orcid": "0000-0002-3487-7922"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Yang, Eloise",
+        "orcid": "0000-0002-9319-4216"
+      },
+      {
+        "affiliation": "LIDYL, CEA-Universit\u00e9 Paris-Saclay, CEA Saclay",
+        "name": "Zaim, Ne\u00efl",
+        "orcid": "0000-0003-0313-4496"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Zhang, Weiqun",
+        "orcid": "0000-0001-8092-1974"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Zhao, Yinjian",
+        "orcid": "0000-0003-4362-3630"
+      },
+      {
+        "affiliation": "Modern Electron",
+        "name": "Zhu, Kevin Z.",
+        "orcid": "0000-0002-8992-305X"
+      },
+      {
+        "affiliation": "Lawrence Berkeley National Laboratory",
+        "name": "Zoni, Edoardo",
+        "orcid": "0000-0001-5662-4646"
+      }
+    ],
+    "license": {
+      "id": "BSD-3-Clause-LBNL"
+    },
+    "language": "eng",
+    "keywords": [
+      "research",
+      "simulation",
+      "plasma",
+      "particle-in-cell",
+      "gpu",
+      "laser",
+      "physics",
+      "pic"
+    ],
+    "access_right": "open",
+    "references": [
+      "Please see https://warpx.readthedocs.io/en/latest/acknowledge_us.html#acknowledge-warpx-all-refs"
+    ],
+    "related_identifiers": [
+    {
+      "identifier": "https://warpx.readthedocs.io",
+      "relation": "isDocumentedBy",
+      "scheme": "url"
+    },
+    {
+      "identifier": "https://blast-warpx.github.io",
+      "relation": "isDescribedBy",
+      "scheme": "url"
+    }
+  ]
+}

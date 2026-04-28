@@ -1,0 +1,20 @@
+cmake -S . -B build \
+    -DWarpX_DIMS=RZ \
+    -DWarpX_APP=OFF \
+    -DWarpX_LIB=ON \
+    -DWarpX_OPENPMD=ON \
+    -DopenPMD_USE_HDF5=ON \
+    -DHDF5_ROOT=/usr/local/hdf5-parallel \
+    -DWarpX_amrex_src=../AMReX \
+    -DWarpX_amrex_internal=OFF \
+    -DWarpX_picsar_src=../picsar \
+    -DWarpX_picsar_internal=OFF \
+    -DWarpX_openpmd_src=../openPMD-api \
+    -DWarpX_openpmd_internal=OFF \
+    -DWarpX_pybind11_src=../pybind11 \
+    -DWarpX_pyamrex_src=../pyamrex \
+    -DopenPMD_json_src=../json-3.11.3 \
+    -DopenPMD_toml11_src=../toml11-4.2.0 \
+    -DWarpX_MPI=ON \
+    -DWarpX_PYTHON=ON \
+    -DWarpX_EB=ON

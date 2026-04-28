@@ -1,0 +1,109 @@
+/* Copyright 2019-2020 Andrew Myers, Luca Fedeli, Maxence Thevenet
+ * Revathi Jambunathan
+ *
+ * This file is part of WarpX.
+ *
+ * License: BSD-3-Clause-LBNL
+ */
+#ifndef WARPX_UTILS_H_
+#define WARPX_UTILS_H_
+
+#include <ablastr/fields/MultiFabRegister.H>
+
+#include <AMReX_BoxArray.H>
+#include <AMReX_DistributionMapping.H>
+#include <AMReX_Extension.H>
+#include <AMReX_GpuQualifiers.H>
+#include <AMReX_LayoutData.H>
+#include <AMReX_ParmParse.H>
+#include <AMReX_Parser.H>
+#include <AMReX_REAL.H>
+#include <AMReX_Utility.H>
+#include <AMReX_Vector.H>
+
+#include <AMReX_BaseFwd.H>
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+void ReadBoostedFrameParameters(amrex::Real& gamma_boost, amrex::Real& beta_boost,
+                                amrex::Vector<int>& boost_direction);
+
+void ConvertLabParamsToBoost();
+
+/** Check the warpx.dims matches the binary name & set up RZ gridding
+ *
+ * Ensures that the blocks are setup correctly for the RZ spectral solver
+ * When using the RZ spectral solver, the Hankel transform cannot be
+ * divided among multiple blocks. Each block must extend over the
+ * entire radial extent.
+ * The grid can be divided up along z, but the number of blocks
+ * must be >= the number of processors.
+ */
+void CheckGriddingForRZSpectral ();
+
+/** Function that sets the value of MultiFab MF to zero.
+ *
+ * \param[in] mf Pointer to the MultiFab
+ * \param[in] lev The mesh refinement level
+ * \param[in] zmin The minimum z of the range to be nullified
+ * \param[in] zmax The maximum z of the range to be nullified
+ */
+void NullifyMFinstance (
+    amrex::MultiFab *mf,
+    int lev,
+    amrex::Real zmin,
+    amrex::Real zmax
+);
+
+/** Function that sets the value of MultiFab MF to zero.
+ *
+ * \param[in] multifab_map Multifab registry
+ * \param[in] mf_name Name of Multifab to modify
+ * \param[in] lev The mesh refinement level
+ * \param[in] zmin The minimum z of the range to be nullified
+ * \param[in] zmax The maximum z of the range to be nullified
+ */
+void NullifyMF (
+    ablastr::fields::MultiFabRegister& multifab_map,
+    std::string const& mf_name,
+    int lev,
+    amrex::Real zmin,
+    amrex::Real zmax
+);
+
+/** Function that sets the value of MultiFab MF to zero.
+ *
+ * \param[in] multifab_map Multifab registry
+ * \param[in] mf_name Name of Multifab to modify
+ * \param[in] dir Direction, for Multifabs that are components of vectors
+ * \param[in] lev The mesh refinement level
+ * \param[in] zmin The minimum z of the range to be nullified
+ * \param[in] zmax The maximum z of the range to be nullified
+ */
+void NullifyMF (
+    ablastr::fields::MultiFabRegister& multifab_map,
+    std::string const& mf_name,
+    ablastr::fields::Direction dir,
+    int lev,
+    amrex::Real zmin,
+    amrex::Real zmax
+);
+
+namespace WarpXUtilLoadBalance
+{
+    /** \brief We only want to update the cost data if the grids we are working on
+     *  are the main grids, i.e. not the PML grids. This function returns whether
+     *   this is the case or not.
+     * @param[in] cost pointer to the cost data
+     * @param[in] ba the grids to check
+     * @param[in] dm the dmap to check
+     * @return consistent whether the grids are consistent or not.
+     */
+    bool doCosts (const amrex::LayoutData<amrex::Real>* cost, const amrex::BoxArray& ba,
+                  const amrex::DistributionMapping& dm);
+}
+
+#endif //WARPX_UTILS_H_
