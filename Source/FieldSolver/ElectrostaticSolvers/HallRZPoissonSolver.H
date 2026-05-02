@@ -37,6 +37,8 @@ public:
         amrex::Real rel_tol = amrex::Real(1.0e-10);
         amrex::Real abs_tol = 0.0;
         int max_coarsening_level = 30;
+        bool allow_nonaligned_coarse_geom = false;
+        bool rz_weighted_geom = false;
         bool static_rho_test = false;
         int static_rho_mode = 0;
         amrex::Real static_rho_amp = 0.0;
@@ -107,14 +109,15 @@ public:
                                           int requested_max);
 
     /**
-     * Build user-provided planar nodal EB-FVM geometry for a HallRZ level.
+     * Build user-provided nodal EB-FVM geometry for a HallRZ level.
      *
      * Components are:
-     *   0: V2D, 1: A_r-, 2: A_r+, 3: A_z-, 4: A_z+, 5: A_EB.
+     *   0: V, 1: A_r-, 2: A_r+, 3: A_z-, 4: A_z+, 5: A_EB.
      *
      * The returned MultiFab is nodal and uses the input BoxArray converted to
-     * nodal index type.  It is intentionally not RZ-weighted; the AMReX
-     * MLEBNodeFVLaplacian must apply the RZ metric internally.
+     * nodal index type.  By default it uses planar measures and AMReX applies
+     * the RZ metric internally.  If rz_weighted is true, components are exact
+     * RZ-weighted moments without the common 2*pi factor.
      */
     static std::unique_ptr<amrex::MultiFab>
     MakeNodalGeometry (Params const& params,
@@ -123,7 +126,8 @@ public:
                        amrex::DistributionMapping const& dmap,
                        int nr_cells = -1,
                        int nz_cells = -1,
-                       int ngrow = 1);
+                       int ngrow = 1,
+                       bool rz_weighted = false);
 
     /**
      * Write electrostatic field from nodal phi into WarpX staggered/Yee RZ layout.

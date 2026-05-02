@@ -58,6 +58,11 @@ struct NodeGeom
     amrex::Real azm = 0.0;
     amrex::Real azp = 0.0;
     amrex::Real aeb = 0.0;
+    amrex::Real arm_rz = 0.0;
+    amrex::Real arp_rz = 0.0;
+    amrex::Real azm_rz = 0.0;
+    amrex::Real azp_rz = 0.0;
+    amrex::Real aeb_rz = 0.0;
 };
 
 struct EBFluxStats
@@ -137,6 +142,18 @@ rectRZVolume (Rect const& a, Rect const& b) noexcept
 }
 
 amrex::Real
+radialMomentOverlap (amrex::Real alo, amrex::Real ahi,
+                     amrex::Real blo, amrex::Real bhi) noexcept
+{
+    amrex::Real const rlo = amrex::max(alo,blo);
+    amrex::Real const rhi = amrex::min(ahi,bhi);
+    if (rhi <= rlo) {
+        return amrex::Real(0.0);
+    }
+    return amrex::Real(0.5) * (rhi*rhi - rlo*rlo);
+}
+
+amrex::Real
 verticalFluidLength (HallDomain const& h, amrex::Real r, amrex::Real za, amrex::Real zb) noexcept
 {
     amrex::Real len = 0.0;
@@ -150,6 +167,15 @@ verticalFluidLength (HallDomain const& h, amrex::Real r, amrex::Real za, amrex::
 }
 
 amrex::Real
+verticalFluidRZArea (HallDomain const& h,
+                     amrex::Real r,
+                     amrex::Real za,
+                     amrex::Real zb) noexcept
+{
+    return r * verticalFluidLength(h, r, za, zb);
+}
+
+amrex::Real
 horizontalFluidLength (HallDomain const& h, amrex::Real z, amrex::Real ra, amrex::Real rb) noexcept
 {
     amrex::Real len = 0.0;
@@ -160,6 +186,22 @@ horizontalFluidLength (HallDomain const& h, amrex::Real z, amrex::Real ra, amrex
         len += overlap(ra, rb, h.rlo, h.rhi);
     }
     return len;
+}
+
+amrex::Real
+horizontalFluidRZArea (HallDomain const& h,
+                       amrex::Real z,
+                       amrex::Real ra,
+                       amrex::Real rb) noexcept
+{
+    amrex::Real area = 0.0;
+    if (contains(h.zlo, h.out, z, h.align_tol)) {
+        area += radialMomentOverlap(ra, rb, h.lob, h.hib);
+    }
+    if (contains(h.out, h.zhi, z, h.align_tol)) {
+        area += radialMomentOverlap(ra, rb, h.rlo, h.rhi);
+    }
+    return area;
 }
 
 amrex::Real
@@ -177,6 +219,24 @@ ebLengthInNode (HallDomain const& h, int seg, Rect const& d) noexcept
     } else { // z=out, hib..rhi
         return contains(d.zlo, d.zhi, h.out, h.align_tol)
             ? overlap(d.rlo,d.rhi,h.hib,h.rhi) : amrex::Real(0.0);
+    }
+}
+
+amrex::Real
+ebRZAreaInNode (HallDomain const& h, int seg, Rect const& d) noexcept
+{
+    if (seg == 0) { // r=lob, zlo..out
+        return contains(d.rlo, d.rhi, h.lob, h.align_tol)
+            ? h.lob * overlap(d.zlo,d.zhi,h.zlo,h.out) : amrex::Real(0.0);
+    } else if (seg == 1) { // r=hib, zlo..out
+        return contains(d.rlo, d.rhi, h.hib, h.align_tol)
+            ? h.hib * overlap(d.zlo,d.zhi,h.zlo,h.out) : amrex::Real(0.0);
+    } else if (seg == 2) { // z=out, rlo..lob
+        return contains(d.zlo, d.zhi, h.out, h.align_tol)
+            ? radialMomentOverlap(d.rlo,d.rhi,h.rlo,h.lob) : amrex::Real(0.0);
+    } else { // z=out, hib..rhi
+        return contains(d.zlo, d.zhi, h.out, h.align_tol)
+            ? radialMomentOverlap(d.rlo,d.rhi,h.hib,h.rhi) : amrex::Real(0.0);
     }
 }
 
@@ -202,8 +262,13 @@ analyticNodeGeom (HallDomain const& h, int nr, int nz, int i, int j) noexcept
     g.arp = verticalFluidLength(h, d.rhi, d.zlo, d.zhi);
     g.azm = horizontalFluidLength(h, d.zlo, d.rlo, d.rhi);
     g.azp = horizontalFluidLength(h, d.zhi, d.rlo, d.rhi);
+    g.arm_rz = verticalFluidRZArea(h, d.rlo, d.zlo, d.zhi);
+    g.arp_rz = verticalFluidRZArea(h, d.rhi, d.zlo, d.zhi);
+    g.azm_rz = horizontalFluidRZArea(h, d.zlo, d.rlo, d.rhi);
+    g.azp_rz = horizontalFluidRZArea(h, d.zhi, d.rlo, d.rhi);
     for (int s = 0; s < 4; ++s) {
         g.aeb += ebLengthInNode(h, s, d);
+        g.aeb_rz += ebRZAreaInNode(h, s, d);
     }
     return g;
 }
@@ -421,6 +486,9 @@ HallRZPoissonSolver::ReadParameters ()
     pp_warpx.query("hall_rz_rel_tol", params.rel_tol);
     pp_warpx.query("hall_rz_abs_tol", params.abs_tol);
     pp_warpx.query("hall_rz_max_coarsening_level", params.max_coarsening_level);
+    pp_warpx.query("hall_rz_allow_nonaligned_coarse_geom",
+                   params.allow_nonaligned_coarse_geom);
+    pp_warpx.query("hall_rz_rz_weighted_geom", params.rz_weighted_geom);
     pp_warpx.query("hall_rz_static_rho_test", params.static_rho_test);
     pp_warpx.query("hall_rz_static_rho_mode", params.static_rho_mode);
     pp_warpx.query("hall_rz_static_rho_amp", params.static_rho_amp);
@@ -655,7 +723,8 @@ HallRZPoissonSolver::MakeNodalGeometry (Params const& params,
                                         amrex::DistributionMapping const& dmap,
                                         int nr_cells,
                                         int nz_cells,
-                                        int ngrow)
+                                        int ngrow,
+                                        bool rz_weighted)
 {
     ValidateGeometry(params, geom);
 
@@ -675,12 +744,21 @@ HallRZPoissonSolver::MakeNodalGeometry (Params const& params,
         for (int j = bx.smallEnd(1); j <= bx.bigEnd(1); ++j) {
             for (int i = bx.smallEnd(0); i <= bx.bigEnd(0); ++i) {
                 NodeGeom const ng = analyticNodeGeom(h, nr, nz, i, j);
-                g(i,j,0,0) = ng.v2d;
-                g(i,j,0,1) = ng.arm;
-                g(i,j,0,2) = ng.arp;
-                g(i,j,0,3) = ng.azm;
-                g(i,j,0,4) = ng.azp;
-                g(i,j,0,5) = ng.aeb;
+                if (rz_weighted) {
+                    g(i,j,0,0) = ng.vrz;
+                    g(i,j,0,1) = ng.arm_rz;
+                    g(i,j,0,2) = ng.arp_rz;
+                    g(i,j,0,3) = ng.azm_rz;
+                    g(i,j,0,4) = ng.azp_rz;
+                    g(i,j,0,5) = ng.aeb_rz;
+                } else {
+                    g(i,j,0,0) = ng.v2d;
+                    g(i,j,0,1) = ng.arm;
+                    g(i,j,0,2) = ng.arp;
+                    g(i,j,0,3) = ng.azm;
+                    g(i,j,0,4) = ng.azp;
+                    g(i,j,0,5) = ng.aeb;
+                }
             }
         }
     }
@@ -705,9 +783,13 @@ HallRZPoissonSolver::ComputePhiAndE (amrex::MultiFab const& rho,
     amrex::MultiFab rho_before(rho.boxArray(), rho.DistributionMap(), 1, 0);
     amrex::MultiFab::Copy(rho_before, rho, 0, 0, 1, 0);
 
-    int const aligned_max = AlignedMaxCoarseningLevel(params, geom, params.max_coarsening_level);
+    int const requested_mcl = amrex::max(0, params.max_coarsening_level);
+    int const aligned_max = AlignedMaxCoarseningLevel(params, geom, requested_mcl);
+    int const effective_mcl = params.allow_nonaligned_coarse_geom
+        ? requested_mcl
+        : aligned_max;
     amrex::LPInfo info;
-    info.setMaxCoarseningLevel(aligned_max);
+    info.setMaxCoarseningLevel(effective_mcl);
 
     amrex::Vector<amrex::Geometry> pgeom{geom};
     amrex::Vector<amrex::BoxArray> pgrids{cell_grids};
@@ -845,23 +927,30 @@ HallRZPoissonSolver::ComputePhiAndE (amrex::MultiFab const& rho,
     linop.setLevelBC(0, &neumann_bc, &robin_a, &robin_b, &robin_f);
     linop.setEBFVMForce(true);
     linop.setEBFVMRZMetricMode(1);
-    linop.setEBFVMRZGeomWeighted(false);
+    linop.setEBFVMRZGeomWeighted(params.rz_weighted_geom);
     linop.setEBInhomogNeumann(0, eb_gn_cc);
     linop.setEBInhomogNeumannLengthMode(1);
     linop.setEBInhomogNeumannFluxScale(amrex::Real(1.0));
 
-    auto fine_geom = MakeNodalGeometry(params, geom, cell_grids, dmap, geom.Domain().length(0), geom.Domain().length(1), 1);
-    linop.setEBNodalGeometry(0, 0, *fine_geom);
-    int nr_l = geom.Domain().length(0);
-    int nz_l = geom.Domain().length(1);
-    for (int lev = 1; lev <= aligned_max; ++lev) {
-        nr_l /= 2;
-        nz_l /= 2;
-        amrex::IntVect const ratio(AMREX_D_DECL(1 << lev, 1 << lev, 1));
-        amrex::BoxArray cba = amrex::coarsen(cell_grids, ratio);
-        amrex::DistributionMapping cdm(cba);
-        auto cgeom = MakeNodalGeometry(params, geom, cba, cdm, nr_l, nz_l, 1);
-        linop.setEBNodalGeometry(0, lev, *cgeom);
+    int const actual_nmg_levels = linop.NMGLevels(0);
+    int const nr_fine = geom.Domain().length(0);
+    int const nz_fine = geom.Domain().length(1);
+    for (int mglev = 0; mglev < actual_nmg_levels; ++mglev) {
+        auto const& level_geom = linop.Geom(0, mglev);
+        int const nr_l = level_geom.Domain().length(0);
+        int const nz_l = level_geom.Domain().length(1);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(nr_l > 0 && nz_l > 0,
+            "HallRZ MG geometry level has invalid domain size.");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE((nr_fine % nr_l) == 0 && (nz_fine % nz_l) == 0,
+            "HallRZ MG geometry level is not an integer coarsening of the fine domain.");
+
+        amrex::IntVect const ratio(AMREX_D_DECL(nr_fine / nr_l, nz_fine / nz_l, 1));
+        amrex::BoxArray level_ba = amrex::coarsen(cell_grids, ratio);
+        amrex::DistributionMapping level_dm(level_ba);
+        auto level_node_geom = MakeNodalGeometry(params, geom, level_ba, level_dm,
+                                                 nr_l, nz_l, 1,
+                                                 params.rz_weighted_geom);
+        linop.setEBNodalGeometry(0, mglev, *level_node_geom);
     }
 
     amrex::MLMG mlmg(linop);
