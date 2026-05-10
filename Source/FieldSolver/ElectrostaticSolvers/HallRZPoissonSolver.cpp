@@ -13,6 +13,7 @@
 
 #include <AMReX_Box.H>
 #include <AMReX_EBFabFactory.H>
+#include <AMReX_Gpu.H>
 #include <AMReX_IntVect.H>
 #include <AMReX_iMultiFab.H>
 #include <AMReX_MFIter.H>
@@ -20,6 +21,7 @@
 #include <AMReX_MLMG.H>
 #include <AMReX_ParmParse.H>
 #include <AMReX_Print.H>
+#include <AMReX_Reduce.H>
 
 #include <algorithm>
 #include <array>
@@ -92,43 +94,48 @@ bool s_python_inlet_dirichlet_active = false;
 int s_python_inlet_dirichlet_nrp1 = 0;
 std::vector<amrex::Real> s_python_inlet_dirichlet_phi;
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 overlap (amrex::Real alo, amrex::Real ahi, amrex::Real blo, amrex::Real bhi) noexcept
 {
     return amrex::max(amrex::Real(0.0), amrex::min(ahi,bhi) - amrex::max(alo,blo));
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 bool
 contains (amrex::Real lo, amrex::Real hi, amrex::Real x, amrex::Real eps) noexcept
 {
     return x >= lo-eps && x <= hi+eps;
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 int
 hallSegment (HallDomain const& h, amrex::Real r, amrex::Real z) noexcept
 {
     amrex::Real const eps = amrex::max(h.align_tol, amrex::Real(1.0e-12));
-    if (std::abs(r - h.lob) <= eps && contains(h.zlo, h.out, z, eps)) {
+    if (amrex::Math::abs(r - h.lob) <= eps && contains(h.zlo, h.out, z, eps)) {
         return 0;
     }
-    if (std::abs(r - h.hib) <= eps && contains(h.zlo, h.out, z, eps)) {
+    if (amrex::Math::abs(r - h.hib) <= eps && contains(h.zlo, h.out, z, eps)) {
         return 1;
     }
-    if (std::abs(z - h.out) <= eps && contains(h.rlo, h.lob, r, eps)) {
+    if (amrex::Math::abs(z - h.out) <= eps && contains(h.rlo, h.lob, r, eps)) {
         return 2;
     }
-    if (std::abs(z - h.out) <= eps && contains(h.hib, h.rhi, r, eps)) {
+    if (amrex::Math::abs(z - h.out) <= eps && contains(h.hib, h.rhi, r, eps)) {
         return 3;
     }
     return -1;
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 rectArea (Rect const& a, Rect const& b) noexcept
 {
     return overlap(a.rlo,a.rhi,b.rlo,b.rhi) * overlap(a.zlo,a.zhi,b.zlo,b.zhi);
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 rectRZVolume (Rect const& a, Rect const& b) noexcept
 {
@@ -141,6 +148,7 @@ rectRZVolume (Rect const& a, Rect const& b) noexcept
     return amrex::Real(0.5) * (rhi*rhi - rlo*rlo) * dz;
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 radialMomentOverlap (amrex::Real alo, amrex::Real ahi,
                      amrex::Real blo, amrex::Real bhi) noexcept
@@ -153,6 +161,7 @@ radialMomentOverlap (amrex::Real alo, amrex::Real ahi,
     return amrex::Real(0.5) * (rhi*rhi - rlo*rlo);
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 verticalFluidLength (HallDomain const& h, amrex::Real r, amrex::Real za, amrex::Real zb) noexcept
 {
@@ -166,6 +175,7 @@ verticalFluidLength (HallDomain const& h, amrex::Real r, amrex::Real za, amrex::
     return len;
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 verticalFluidRZArea (HallDomain const& h,
                      amrex::Real r,
@@ -175,6 +185,7 @@ verticalFluidRZArea (HallDomain const& h,
     return r * verticalFluidLength(h, r, za, zb);
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 horizontalFluidLength (HallDomain const& h, amrex::Real z, amrex::Real ra, amrex::Real rb) noexcept
 {
@@ -188,6 +199,7 @@ horizontalFluidLength (HallDomain const& h, amrex::Real z, amrex::Real ra, amrex
     return len;
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 horizontalFluidRZArea (HallDomain const& h,
                        amrex::Real z,
@@ -204,6 +216,7 @@ horizontalFluidRZArea (HallDomain const& h,
     return area;
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 ebLengthInNode (HallDomain const& h, int seg, Rect const& d) noexcept
 {
@@ -222,6 +235,7 @@ ebLengthInNode (HallDomain const& h, int seg, Rect const& d) noexcept
     }
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 ebRZAreaInNode (HallDomain const& h, int seg, Rect const& d) noexcept
 {
@@ -240,6 +254,7 @@ ebRZAreaInNode (HallDomain const& h, int seg, Rect const& d) noexcept
     }
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 NodeGeom
 analyticNodeGeom (HallDomain const& h, int nr, int nz, int i, int j) noexcept
 {
@@ -273,9 +288,11 @@ analyticNodeGeom (HallDomain const& h, int nr, int nz, int i, int j) noexcept
     return g;
 }
 
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 amrex::Real
 staticRho (HallRZPoissonSolver::Params const& params,
-           amrex::Geometry const& geom,
+           amrex::Real zlo,
+           amrex::Real zhi,
            amrex::Real r, amrex::Real z) noexcept
 {
     if (params.static_rho_mode == 0) {
@@ -286,7 +303,8 @@ staticRho (HallRZPoissonSolver::Params const& params,
     }
 
     amrex::Real const rc = amrex::Real(0.5) * (params.lob + params.hib);
-    amrex::Real const zc = amrex::Real(0.5) * (geom.ProbLo(1) + params.out);
+    amrex::Real const zc = amrex::Real(0.5) * (zlo + params.out);
+    amrex::ignore_unused(zhi);
     amrex::Real const lr = params.static_rho_lambda_r;
     amrex::Real const lz = params.static_rho_lambda_z;
     amrex::Real const ar = (r - rc) / lr;
@@ -297,19 +315,25 @@ staticRho (HallRZPoissonSolver::Params const& params,
 std::pair<long,long>
 countNaNInf (amrex::MultiFab const& mf)
 {
-    long nnan = 0;
-    long ninf = 0;
-    for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
-        amrex::Box const& bx = mfi.validbox();
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_ops;
+    amrex::ReduceData<amrex::Long, amrex::Long> reduce_data(reduce_ops);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+
+    for (amrex::MFIter mfi(mf, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Box const& bx = mfi.tilebox();
         auto const& a = mf.const_array(mfi);
-        for (int j = bx.smallEnd(1); j <= bx.bigEnd(1); ++j) {
-            for (int i = bx.smallEnd(0); i <= bx.bigEnd(0); ++i) {
-                amrex::Real const v = a(i,j,0);
-                if (std::isnan(v)) { ++nnan; }
-                if (std::isinf(v)) { ++ninf; }
-            }
-        }
+
+        reduce_ops.eval(bx, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept -> ReduceTuple
+            {
+                amrex::Real const v = a(i,j,k);
+                return {static_cast<amrex::Long>(amrex::isnan(v)),
+                        static_cast<amrex::Long>(amrex::isinf(v))};
+            });
     }
+
+    amrex::Long nnan = amrex::get<0>(reduce_data.value());
+    amrex::Long ninf = amrex::get<1>(reduce_data.value());
     amrex::ParallelDescriptor::ReduceLongSum(nnan);
     amrex::ParallelDescriptor::ReduceLongSum(ninf);
     return {nnan, ninf};
@@ -348,6 +372,17 @@ fillEBNeumann (HallRZPoissonSolver::Params const& params,
             "Python HallRZ EB Neumann array currently requires a zero-based cell domain.");
     }
 
+    amrex::Gpu::DeviceVector<amrex::Real> d_python_eb_neumann;
+    if (use_python) {
+        d_python_eb_neumann.resize(s_python_eb_neumann.size());
+        amrex::Gpu::copy(amrex::Gpu::hostToDevice,
+                         s_python_eb_neumann.begin(), s_python_eb_neumann.end(),
+                         d_python_eb_neumann.begin());
+    }
+    amrex::Real const* const python_eb =
+        use_python ? d_python_eb_neumann.data() : nullptr;
+    int const python_nz = s_python_eb_neumann_nz;
+
     auto const dx = geom.CellSizeArray();
     auto const plo = geom.ProbLoArray();
     HallDomain const hd{geom.ProbLo(0), geom.ProbHi(0), geom.ProbLo(1), geom.ProbHi(1),
@@ -355,12 +390,21 @@ fillEBNeumann (HallRZPoissonSolver::Params const& params,
                         amrex::max(params.align_tol,
                                    amrex::Real(1.0e-8) * amrex::max(dx[0], dx[1]))};
 
-    for (amrex::MFIter mfi(eb_gn_cc); mfi.isValid(); ++mfi) {
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_ops;
+    amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real,
+                      amrex::Real, amrex::Real> reduce_data(reduce_ops);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+
+    int const flux_segment = params.eb_wall_flux_segment;
+    amrex::Real const scalar_g0 = params.eb_g0;
+
+    for (amrex::MFIter mfi(eb_gn_cc, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         if (!eb_factory.getBndryArea().ok(mfi)) {
             continue;
         }
 
-        amrex::Box ccbx = eb_gn_cc[mfi].box();
+        amrex::Box ccbx = mfi.tilebox();
         ccbx &= geom.Domain();
 
         auto const& gn = eb_gn_cc.array(mfi);
@@ -369,14 +413,17 @@ fillEBNeumann (HallRZPoissonSolver::Params const& params,
         auto const& bn = eb_factory.getBndryNormal().const_array(mfi);
         auto const& flg = eb_factory.getMultiEBCellFlagFab().const_array(mfi);
 
-        for (int j = ccbx.smallEnd(1); j <= ccbx.bigEnd(1); ++j) {
-            for (int i = ccbx.smallEnd(0); i <= ccbx.bigEnd(0); ++i) {
+        reduce_ops.eval(ccbx, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept -> ReduceTuple
+            {
                 if (!flg(i,j,0).isSingleValued()) {
-                    continue;
+                    return {amrex::Real(0.0), amrex::Real(0.0), amrex::Real(0.0),
+                            amrex::Real(0.0), amrex::Real(0.0)};
                 }
                 amrex::Real const area = ba(i,j,0);
                 if (area <= amrex::Real(0.0)) {
-                    continue;
+                    return {amrex::Real(0.0), amrex::Real(0.0), amrex::Real(0.0),
+                            amrex::Real(0.0), amrex::Real(0.0)};
                 }
 
                 amrex::Real const fx = amrex::max(amrex::Real(0.0),
@@ -387,22 +434,23 @@ fillEBNeumann (HallRZPoissonSolver::Params const& params,
                 amrex::Real const zbc = plo[1] + (amrex::Real(j) + fy) * dx[1];
                 int const seg = hallSegment(hd, rbc, zbc);
                 if (seg < 0) {
-                    continue;
+                    return {amrex::Real(0.0), amrex::Real(0.0), amrex::Real(0.0),
+                            amrex::Real(0.0), amrex::Real(0.0)};
                 }
-                if (params.eb_wall_flux_segment >= 0 &&
-                    params.eb_wall_flux_segment != seg)
+                if (flux_segment >= 0 && flux_segment != seg)
                 {
-                    continue;
+                    return {amrex::Real(0.0), amrex::Real(0.0), amrex::Real(0.0),
+                            amrex::Real(0.0), amrex::Real(0.0)};
                 }
 
                 amrex::Real const geb = use_python
-                    ? s_python_eb_neumann[static_cast<std::size_t>(i) * s_python_eb_neumann_nz
-                                          + static_cast<std::size_t>(j)]
-                    : params.eb_g0;
+                    ? python_eb[i * python_nz + j]
+                    : scalar_g0;
                 gn(i,j,0,0) = geb;
 
-                amrex::Real const len_scale = std::hypot(dx[0]*bn(i,j,0,1),
-                                                         dx[1]*bn(i,j,0,0));
+                amrex::Real const len_x = dx[0]*bn(i,j,0,1);
+                amrex::Real const len_y = dx[1]*bn(i,j,0,0);
+                amrex::Real const len_scale = std::sqrt(len_x*len_x + len_y*len_y);
                 amrex::Real q = -geb * area * len_scale;
 
                 // Match mlebndfvlap_eb_inhom_neu_inject_2d: two-point
@@ -424,12 +472,19 @@ fillEBNeumann (HallRZPoissonSolver::Params const& params,
                 }
                 q *= r_avg;
 
-                stats.total += q;
-                stats.segment[seg] += q;
-            }
-        }
+                return {q,
+                        (seg == 0) ? q : amrex::Real(0.0),
+                        (seg == 1) ? q : amrex::Real(0.0),
+                        (seg == 2) ? q : amrex::Real(0.0),
+                        (seg == 3) ? q : amrex::Real(0.0)};
+            });
     }
 
+    stats.total = amrex::get<0>(reduce_data.value());
+    stats.segment[0] = amrex::get<1>(reduce_data.value());
+    stats.segment[1] = amrex::get<2>(reduce_data.value());
+    stats.segment[2] = amrex::get<3>(reduce_data.value());
+    stats.segment[3] = amrex::get<4>(reduce_data.value());
     amrex::ParallelDescriptor::ReduceRealSum(stats.total);
     for (auto& s : stats.segment) {
         amrex::ParallelDescriptor::ReduceRealSum(s);
@@ -445,27 +500,35 @@ sumOperatorRZWeightedOwner (amrex::MultiFab const& mf,
                             int nz0)
 {
     auto owner_mask = amrex::OwnerMask(mf, geom.periodicity());
-    amrex::Real sum = amrex::Real(0.0);
     amrex::Real const dr = geom.CellSize(0);
+    amrex::Real const rlo = geom.ProbLo(0);
     int const ilo = amrex::surroundingNodes(geom.Domain()).smallEnd(0);
-    for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
-        amrex::Box const& bx = mfi.validbox();
+
+    amrex::ReduceOps<amrex::ReduceOpSum> reduce_ops;
+    amrex::ReduceData<amrex::Real> reduce_data(reduce_ops);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+
+    for (amrex::MFIter mfi(mf, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Box const& bx = mfi.tilebox();
         auto const& a = mf.const_array(mfi);
         auto const& om = owner_mask->const_array(mfi);
-        for (int j = bx.smallEnd(1); j <= bx.bigEnd(1); ++j) {
-            for (int i = bx.smallEnd(0); i <= bx.bigEnd(0); ++i) {
+
+        reduce_ops.eval(bx, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept -> ReduceTuple
+            {
                 if (om(i,j,0) == 0) {
-                    continue;
+                    return {amrex::Real(0.0)};
                 }
                 NodeGeom const ng = analyticNodeGeom(hd, nr0, nz0, i, j);
-                amrex::Real const rnode = geom.ProbLo(0) + amrex::Real(i) * dr;
-                amrex::Real const vfac = (geom.ProbLo(0) == amrex::Real(0.0) && i == ilo)
+                amrex::Real const rnode = rlo + amrex::Real(i) * dr;
+                amrex::Real const vfac = (rlo == amrex::Real(0.0) && i == ilo)
                     ? amrex::Real(0.25) * dr
                     : amrex::max(rnode, amrex::Real(0.25) * dr);
-                sum += ng.v2d * vfac * a(i,j,0);
-            }
-        }
+                return {ng.v2d * vfac * a(i,j,k)};
+            });
     }
+
+    amrex::Real sum = amrex::get<0>(reduce_data.value());
     amrex::ParallelDescriptor::ReduceRealSum(sum);
     return sum;
 }
@@ -738,29 +801,30 @@ HallRZPoissonSolver::MakeNodalGeometry (Params const& params,
                        geom.ProbLo(1), geom.ProbHi(1),
                        params.lob, params.hib, params.out, params.align_tol};
 
-    for (amrex::MFIter mfi(*eb_node_geom); mfi.isValid(); ++mfi) {
-        amrex::Box const& bx = mfi.validbox();
+    for (amrex::MFIter mfi(*eb_node_geom, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Box const& bx = mfi.tilebox();
         auto const& g = eb_node_geom->array(mfi);
-        for (int j = bx.smallEnd(1); j <= bx.bigEnd(1); ++j) {
-            for (int i = bx.smallEnd(0); i <= bx.bigEnd(0); ++i) {
+
+        amrex::ParallelFor(bx,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
                 NodeGeom const ng = analyticNodeGeom(h, nr, nz, i, j);
                 if (rz_weighted) {
-                    g(i,j,0,0) = ng.vrz;
-                    g(i,j,0,1) = ng.arm_rz;
-                    g(i,j,0,2) = ng.arp_rz;
-                    g(i,j,0,3) = ng.azm_rz;
-                    g(i,j,0,4) = ng.azp_rz;
-                    g(i,j,0,5) = ng.aeb_rz;
+                    g(i,j,k,0) = ng.vrz;
+                    g(i,j,k,1) = ng.arm_rz;
+                    g(i,j,k,2) = ng.arp_rz;
+                    g(i,j,k,3) = ng.azm_rz;
+                    g(i,j,k,4) = ng.azp_rz;
+                    g(i,j,k,5) = ng.aeb_rz;
                 } else {
-                    g(i,j,0,0) = ng.v2d;
-                    g(i,j,0,1) = ng.arm;
-                    g(i,j,0,2) = ng.arp;
-                    g(i,j,0,3) = ng.azm;
-                    g(i,j,0,4) = ng.azp;
-                    g(i,j,0,5) = ng.aeb;
+                    g(i,j,k,0) = ng.v2d;
+                    g(i,j,k,1) = ng.arm;
+                    g(i,j,k,2) = ng.arp;
+                    g(i,j,k,3) = ng.azm;
+                    g(i,j,k,4) = ng.azp;
+                    g(i,j,k,5) = ng.aeb;
                 }
-            }
-        }
+            });
     }
     eb_node_geom->FillBoundary(geom.periodicity());
     return eb_node_geom;
@@ -838,84 +902,149 @@ HallRZPoissonSolver::ComputePhiAndE (amrex::MultiFab const& rho,
     if (s_python_robin_zhi_active) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(s_python_robin_zhi_nrp1 == nr0 + 1,
             "Python HallRZ z-hi Robin arrays must have shape (Nr+1).");
+        for (int i = 0; i <= nr0; ++i) {
+            amrex::Real const a = s_python_robin_zhi_a[static_cast<std::size_t>(i)];
+            amrex::Real const b = s_python_robin_zhi_b[static_cast<std::size_t>(i)];
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(amrex::Math::abs(a) + amrex::Math::abs(b) >
+                                             amrex::Real(0.0),
+                "Invalid Python HallRZ z-hi Robin data: a and b cannot both be zero.");
+        }
     }
     if (s_python_robin_rhi_active) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(s_python_robin_rhi_nzp1 == nz0 + 1,
             "Python HallRZ r-hi Robin arrays must have shape (Nz+1).");
+        for (int j = 0; j <= nz0; ++j) {
+            amrex::Real const z = plo[1] + amrex::Real(j) * dx[1];
+            bool const active_rhi = contains(params.out, geom.ProbHi(1), z, params.align_tol);
+            if (active_rhi) {
+                amrex::Real const a = s_python_robin_rhi_a[static_cast<std::size_t>(j)];
+                amrex::Real const b = s_python_robin_rhi_b[static_cast<std::size_t>(j)];
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(amrex::Math::abs(a) + amrex::Math::abs(b) >
+                                                 amrex::Real(0.0),
+                    "Invalid Python HallRZ r-hi Robin data: a and b cannot both be zero "
+                    "on an active node.");
+            }
+        }
     }
     if (s_python_inlet_dirichlet_active) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(s_python_inlet_dirichlet_nrp1 == nr0 + 1,
             "Python HallRZ inlet Dirichlet array must have shape (Nr+1).");
     }
 
-    amrex::Real rho_min = std::numeric_limits<amrex::Real>::max();
-    amrex::Real rho_max = -std::numeric_limits<amrex::Real>::max();
-    amrex::Real rhs_min = std::numeric_limits<amrex::Real>::max();
-    amrex::Real rhs_max = -std::numeric_limits<amrex::Real>::max();
-    amrex::Real rho_sum_vr = amrex::Real(0.0);
+    amrex::Gpu::DeviceVector<amrex::Real> d_robin_zhi_a;
+    amrex::Gpu::DeviceVector<amrex::Real> d_robin_zhi_b;
+    amrex::Gpu::DeviceVector<amrex::Real> d_robin_zhi_f;
+    amrex::Gpu::DeviceVector<amrex::Real> d_robin_rhi_a;
+    amrex::Gpu::DeviceVector<amrex::Real> d_robin_rhi_b;
+    amrex::Gpu::DeviceVector<amrex::Real> d_robin_rhi_f;
+    amrex::Gpu::DeviceVector<amrex::Real> d_inlet_phi;
 
-    for (amrex::MFIter mfi(rhs); mfi.isValid(); ++mfi) {
-        amrex::Box const& bx = mfi.validbox();
+    auto copy_to_device = [] (std::vector<amrex::Real> const& src,
+                              amrex::Gpu::DeviceVector<amrex::Real>& dst)
+    {
+        dst.resize(src.size());
+        amrex::Gpu::copy(amrex::Gpu::hostToDevice, src.begin(), src.end(), dst.begin());
+    };
+
+    bool const use_robin_zhi = s_python_robin_zhi_active;
+    bool const use_robin_rhi = s_python_robin_rhi_active;
+    bool const use_inlet_dirichlet = s_python_inlet_dirichlet_active;
+    if (use_robin_zhi) {
+        copy_to_device(s_python_robin_zhi_a, d_robin_zhi_a);
+        copy_to_device(s_python_robin_zhi_b, d_robin_zhi_b);
+        copy_to_device(s_python_robin_zhi_f, d_robin_zhi_f);
+    }
+    if (use_robin_rhi) {
+        copy_to_device(s_python_robin_rhi_a, d_robin_rhi_a);
+        copy_to_device(s_python_robin_rhi_b, d_robin_rhi_b);
+        copy_to_device(s_python_robin_rhi_f, d_robin_rhi_f);
+    }
+    if (use_inlet_dirichlet) {
+        copy_to_device(s_python_inlet_dirichlet_phi, d_inlet_phi);
+    }
+
+    amrex::Real const* const robin_zhi_a = use_robin_zhi ? d_robin_zhi_a.data() : nullptr;
+    amrex::Real const* const robin_zhi_b = use_robin_zhi ? d_robin_zhi_b.data() : nullptr;
+    amrex::Real const* const robin_zhi_f = use_robin_zhi ? d_robin_zhi_f.data() : nullptr;
+    amrex::Real const* const robin_rhi_a = use_robin_rhi ? d_robin_rhi_a.data() : nullptr;
+    amrex::Real const* const robin_rhi_b = use_robin_rhi ? d_robin_rhi_b.data() : nullptr;
+    amrex::Real const* const robin_rhi_f = use_robin_rhi ? d_robin_rhi_f.data() : nullptr;
+    amrex::Real const* const inlet_phi = use_inlet_dirichlet ? d_inlet_phi.data() : nullptr;
+
+    amrex::ReduceOps<amrex::ReduceOpMin, amrex::ReduceOpMax, amrex::ReduceOpMin,
+                     amrex::ReduceOpMax, amrex::ReduceOpSum> reduce_ops;
+    amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real,
+                      amrex::Real, amrex::Real> reduce_data(reduce_ops);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    amrex::Real const zlo = geom.ProbLo(1);
+    amrex::Real const zhi = geom.ProbHi(1);
+    amrex::Real const inv_eps0 = amrex::Real(1.0) / PhysConst::epsilon_0;
+    int const rhi_node = nd.bigEnd(0);
+    int const zlo_node = nd.smallEnd(1);
+    int const zhi_node = nd.bigEnd(1);
+
+    for (amrex::MFIter mfi(rhs, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Box const& bx = mfi.tilebox();
         auto const& rarr = rhs.array(mfi);
         auto const& rhoarr = rho.const_array(mfi);
         auto const& parr = phi.array(mfi);
         auto const& ra = robin_a.array(mfi);
         auto const& rb = robin_b.array(mfi);
         auto const& rf = robin_f.array(mfi);
-        for (int j = bx.smallEnd(1); j <= bx.bigEnd(1); ++j) {
-            for (int i = bx.smallEnd(0); i <= bx.bigEnd(0); ++i) {
+
+        reduce_ops.eval(bx, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept -> ReduceTuple
+            {
                 amrex::Real const r = plo[0] + amrex::Real(i)*dx[0];
                 amrex::Real const z = plo[1] + amrex::Real(j)*dx[1];
                 amrex::Real const rho_src = params.static_rho_test
-                    ? staticRho(params, geom, r, z)
-                    : rhoarr(i,j,0);
-                amrex::Real const rhs_val = -rho_src / PhysConst::epsilon_0;
-                rarr(i,j,0) = rhs_val;
+                    ? staticRho(params, zlo, zhi, r, z)
+                    : rhoarr(i,j,k);
+                amrex::Real const rhs_val = -rho_src * inv_eps0;
+                rarr(i,j,k) = rhs_val;
                 NodeGeom const ng = analyticNodeGeom(hd, nr0, nz0, i, j);
-                rho_min = amrex::min(rho_min, rho_src);
-                rho_max = amrex::max(rho_max, rho_src);
-                rhs_min = amrex::min(rhs_min, rhs_val);
-                rhs_max = amrex::max(rhs_max, rhs_val);
-                rho_sum_vr += rho_src * ng.vrz;
-                if (i == nd.bigEnd(0)) {
-                    bool const active_rhi = contains(params.out, geom.ProbHi(1), z, params.align_tol);
+                if (i == rhi_node) {
+                    bool const active_rhi = contains(params.out, zhi, z, params.align_tol);
                     amrex::Real a = amrex::Real(1.0);
                     amrex::Real b = amrex::Real(1.0);
                     amrex::Real f = amrex::Real(0.0);
-                    if (s_python_robin_rhi_active && active_rhi) {
-                        a = s_python_robin_rhi_a[static_cast<std::size_t>(j)];
-                        b = s_python_robin_rhi_b[static_cast<std::size_t>(j)];
-                        f = s_python_robin_rhi_f[static_cast<std::size_t>(j)];
-                        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::abs(a) + std::abs(b) > amrex::Real(0.0),
-                            "Invalid Python HallRZ r-hi Robin data: a and b cannot both be zero on an active node.");
+                    if (use_robin_rhi && active_rhi) {
+                        a = robin_rhi_a[j];
+                        b = robin_rhi_b[j];
+                        f = robin_rhi_f[j];
                     }
-                    ra(i,j,0,1) = a;
-                    rb(i,j,0,1) = b;
-                    rf(i,j,0,1) = f;
+                    ra(i,j,k,1) = a;
+                    rb(i,j,k,1) = b;
+                    rf(i,j,k,1) = f;
                 }
-                if (j == nd.bigEnd(1)) {
+                if (j == zhi_node) {
                     amrex::Real a = amrex::Real(1.0);
                     amrex::Real b = amrex::Real(1.0);
                     amrex::Real f = amrex::Real(0.0);
-                    if (s_python_robin_zhi_active) {
-                        a = s_python_robin_zhi_a[static_cast<std::size_t>(i)];
-                        b = s_python_robin_zhi_b[static_cast<std::size_t>(i)];
-                        f = s_python_robin_zhi_f[static_cast<std::size_t>(i)];
-                        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::abs(a) + std::abs(b) > amrex::Real(0.0),
-                            "Invalid Python HallRZ z-hi Robin data: a and b cannot both be zero on an active node.");
+                    if (use_robin_zhi) {
+                        a = robin_zhi_a[i];
+                        b = robin_zhi_b[i];
+                        f = robin_zhi_f[i];
                     }
-                    ra(i,j,0,3) = a;
-                    rb(i,j,0,3) = b;
-                    rf(i,j,0,3) = f;
+                    ra(i,j,k,3) = a;
+                    rb(i,j,k,3) = b;
+                    rf(i,j,k,3) = f;
                 }
-                if (s_python_inlet_dirichlet_active && j == nd.smallEnd(1) &&
+                if (use_inlet_dirichlet && j == zlo_node &&
                     contains(params.lob, params.hib, r, params.align_tol))
                 {
-                    parr(i,j,0) = s_python_inlet_dirichlet_phi[static_cast<std::size_t>(i)];
+                    parr(i,j,k) = inlet_phi[i];
                 }
-            }
-        }
+
+                return {rho_src, rho_src, rhs_val, rhs_val, rho_src * ng.vrz};
+            });
     }
+
+    amrex::Real rho_min = amrex::get<0>(reduce_data.value());
+    amrex::Real rho_max = amrex::get<1>(reduce_data.value());
+    amrex::Real rhs_min = amrex::get<2>(reduce_data.value());
+    amrex::Real rhs_max = amrex::get<3>(reduce_data.value());
+    amrex::Real rho_sum_vr = amrex::get<4>(reduce_data.value());
     amrex::ParallelDescriptor::ReduceRealMin(rho_min);
     amrex::ParallelDescriptor::ReduceRealMax(rho_max);
     amrex::ParallelDescriptor::ReduceRealMin(rhs_min);
@@ -970,7 +1099,7 @@ HallRZPoissonSolver::ComputePhiAndE (amrex::MultiFab const& rho,
     amrex::Real const q_eb_eps = amrex::Math::abs(q_eb_diff) /
         (amrex::Math::abs(eb_flux.total) + amrex::Real(1.0e-300));
 
-    ComputeStaggeredE(phi, Efield, geom);
+    ComputeStaggeredE(phi, Efield, geom, eb_factory);
 
     amrex::MultiFab rho_after_diff(rho.boxArray(), rho.DistributionMap(), 1, 0);
     amrex::MultiFab::Copy(rho_after_diff, rho, 0, 0, 1, 0);
@@ -1035,7 +1164,8 @@ HallRZPoissonSolver::ComputePhiAndE (amrex::MultiFab const& rho,
 void
 HallRZPoissonSolver::ComputeStaggeredE (amrex::MultiFab const& phi,
                                         amrex::Array<amrex::MultiFab*,3> const& Efield,
-                                        amrex::Geometry const& geom)
+                                        amrex::Geometry const& geom,
+                                        amrex::EBFArrayBoxFactory const& eb_factory)
 {
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(Efield[0] != nullptr && Efield[2] != nullptr,
                                      "HallRZ staggered E writeback requires Efield[0] and Efield[2].");
@@ -1049,27 +1179,40 @@ HallRZPoissonSolver::ComputeStaggeredE (amrex::MultiFab const& phi,
 
     amrex::Real const dr = geom.CellSize(0);
     amrex::Real const dz = geom.CellSize(1);
+    auto const& levset = eb_factory.getLevelSet();
 
-    for (amrex::MFIter mfi(*Efield[0]); mfi.isValid(); ++mfi) {
-        amrex::Box const& bx = mfi.validbox();
+    for (amrex::MFIter mfi(*Efield[0], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Box const& bx = mfi.tilebox();
         auto const& er = Efield[0]->array(mfi);
         auto const& ph = phi.const_array(mfi);
-        for (int j = bx.smallEnd(1); j <= bx.bigEnd(1); ++j) {
-            for (int i = bx.smallEnd(0); i <= bx.bigEnd(0); ++i) {
-                er(i,j,0) = -(ph(i+1,j,0) - ph(i,j,0)) / dr;
-            }
-        }
+        auto const& ls = levset.const_array(mfi);
+
+        amrex::ParallelFor(bx,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                bool const fluid_edge = (ls(i,j,0) <= amrex::Real(0.0)) &&
+                                        (ls(i+1,j,0) <= amrex::Real(0.0));
+                er(i,j,k) = fluid_edge
+                    ? -(ph(i+1,j,k) - ph(i,j,k)) / dr
+                    : amrex::Real(0.0);
+            });
     }
 
-    for (amrex::MFIter mfi(*Efield[2]); mfi.isValid(); ++mfi) {
-        amrex::Box const& bx = mfi.validbox();
+    for (amrex::MFIter mfi(*Efield[2], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Box const& bx = mfi.tilebox();
         auto const& ez = Efield[2]->array(mfi);
         auto const& ph = phi.const_array(mfi);
-        for (int j = bx.smallEnd(1); j <= bx.bigEnd(1); ++j) {
-            for (int i = bx.smallEnd(0); i <= bx.bigEnd(0); ++i) {
-                ez(i,j,0) = -(ph(i,j+1,0) - ph(i,j,0)) / dz;
-            }
-        }
+        auto const& ls = levset.const_array(mfi);
+
+        amrex::ParallelFor(bx,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                bool const fluid_edge = (ls(i,j,0) <= amrex::Real(0.0)) &&
+                                        (ls(i,j+1,0) <= amrex::Real(0.0));
+                ez(i,j,k) = fluid_edge
+                    ? -(ph(i,j+1,k) - ph(i,j,k)) / dz
+                    : amrex::Real(0.0);
+            });
     }
 
     if (HallRZPoissonSolver::ReadParameters().verbose >= 1) {

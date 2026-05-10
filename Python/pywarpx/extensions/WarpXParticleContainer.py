@@ -7,6 +7,15 @@ License: BSD-3-Clause-LBNL
 """
 
 
+def _as_host_array(data):
+    """Return input data with CUDA arrays explicitly copied to host."""
+    if hasattr(data, "__cuda_array_interface__"):
+        if not hasattr(data, "get"):
+            raise TypeError("CUDA particle inputs must provide a get() method")
+        return data.get()
+    return data
+
+
 def add_particles(
     self,
     x=None,
@@ -49,6 +58,15 @@ def add_particles(
     import numpy as np
 
     from .._libwarpx import libwarpx
+
+    x = _as_host_array(x)
+    y = _as_host_array(y)
+    z = _as_host_array(z)
+    ux = _as_host_array(ux)
+    uy = _as_host_array(uy)
+    uz = _as_host_array(uz)
+    w = _as_host_array(w)
+    kwargs = {key: _as_host_array(val) for key, val in kwargs.items()}
 
     # --- Get length of arrays, set to one for scalars
     lenx = np.size(x)

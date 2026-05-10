@@ -9,17 +9,26 @@ import numpy as np
 from ._libwarpx import libwarpx
 
 
+def _as_host_array(data):
+    """Return a NumPy view/copy, explicitly copying CUDA arrays to host."""
+    if hasattr(data, "__cuda_array_interface__"):
+        if not hasattr(data, "get"):
+            raise TypeError("hallrz CUDA array inputs must provide a get() method")
+        data = data.get()
+    return np.asarray(data)
+
+
 def set_eb_neumann(g_eb_2d):
     """Set persistent cell-centered EB Neumann data.
 
     Parameters
     ----------
-    g_eb_2d : numpy.ndarray
+    g_eb_2d : array-like
         C-contiguous float64 array with shape ``(Nr, Nz)`` storing
         ``g_EB=dphi/dn`` at cell centers.  Only EB2 single-valued cells consume
         these values during HallRZ Poisson solves.
     """
-    arr = np.asarray(g_eb_2d)
+    arr = _as_host_array(g_eb_2d)
     if arr.dtype != np.float64:
         raise TypeError("hallrz.set_eb_neumann expects dtype np.float64")
     if arr.ndim != 2:
@@ -40,7 +49,7 @@ def has_eb_neumann():
 
 
 def _as_1d_float64(name, data):
-    arr = np.asarray(data)
+    arr = _as_host_array(data)
     if arr.dtype != np.float64:
         raise TypeError(f"hallrz.{name} expects dtype np.float64")
     if arr.ndim != 1:

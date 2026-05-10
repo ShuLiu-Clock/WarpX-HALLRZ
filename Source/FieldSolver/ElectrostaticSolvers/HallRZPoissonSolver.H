@@ -136,10 +136,14 @@ public:
      *   E[0] = E_r on IntVect(0,1), using -(phi(i+1,j)-phi(i,j))/dr.
      *   E[2] = E_z on IntVect(1,0), using -(phi(i,j+1)-phi(i,j))/dz.
      *   E[1] is not modified here.
+     *
+     * Field points whose finite-difference segment touches the EB covered side
+     * are set to zero to avoid gathering fields computed from inactive phi nodes.
      */
     static void ComputeStaggeredE (amrex::MultiFab const& phi,
                                    amrex::Array<amrex::MultiFab*,3> const& Efield,
-                                   amrex::Geometry const& geom);
+                                   amrex::Geometry const& geom,
+                                   amrex::EBFArrayBoxFactory const& eb_factory);
 
     /**
      * HallRZ Poisson solve and WarpX staggered E writeback.
