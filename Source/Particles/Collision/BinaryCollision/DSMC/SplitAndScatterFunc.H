@@ -497,7 +497,8 @@ public:
 
                 // sample random x value and calculate y
                 const double x = (2.0 * amrex::Random(engine) - 1.0) * a;
-                const double y2 = b*b - b*b/(a*a) * x*x;
+                const double y2_raw = b*b - b*b/(a*a) * x*x;
+                const double y2 = (y2_raw < 0.0) ? 0.0 : y2_raw;
                 const double n_0 = std::sqrt(y2 + x*x - x*n_2 + 0.25*n_2*n_2);
                 const double n_1 = 1.0 - n_0 - n_2;
 
@@ -511,10 +512,33 @@ public:
                 // that the net linear momentum in the current frame is 0.
                 // This is achieved by arranging the momentum vectors in
                 // a triangle and finding the required angles between the vectors.
-                const double cos_alpha = (n_0*n_0 + n_1*n_1 - n_2*n_2) / (2.0 * n_0 * n_1);
-                const double sin_alpha = std::sqrt(1.0 - cos_alpha*cos_alpha);
-                const double cos_gamma = (n_0*n_0 + n_2*n_2 - n_1*n_1) / (2.0 * n_0 * n_2);
-                const double sin_gamma = std::sqrt(1.0 - cos_gamma*cos_gamma);
+                double cos_alpha = (n_0*n_0 + n_1*n_1 - n_2*n_2) / (2.0 * n_0 * n_1);
+                if (cos_alpha > 1.0) {
+                    cos_alpha = 1.0;
+                } else if (cos_alpha < -1.0) {
+                    cos_alpha = -1.0;
+                }
+                double sin_alpha_arg = 1.0 - cos_alpha*cos_alpha;
+                if (sin_alpha_arg < 0.0) {
+                    sin_alpha_arg = 0.0;
+                }
+                const double sin_alpha = std::sqrt(sin_alpha_arg);
+
+                double cos_gamma = 1.0;
+                double sin_gamma_arg = 0.0;
+                if (n_2 > 0.0) {
+                    cos_gamma = (n_0*n_0 + n_2*n_2 - n_1*n_1) / (2.0 * n_0 * n_2);
+                    if (cos_gamma > 1.0) {
+                        cos_gamma = 1.0;
+                    } else if (cos_gamma < -1.0) {
+                        cos_gamma = -1.0;
+                    }
+                    sin_gamma_arg = 1.0 - cos_gamma*cos_gamma;
+                    if (sin_gamma_arg < 0.0) {
+                        sin_gamma_arg = 0.0;
+                    }
+                }
+                const double sin_gamma = std::sqrt(sin_gamma_arg);
 
                 // choose random theta and phi values (orientation of the triangle)
                 const double Theta = amrex::Random(engine) * 2.0 * MathConst::pi;
