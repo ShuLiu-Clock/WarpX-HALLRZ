@@ -17,6 +17,9 @@
 #include "Utils/WarpXConst.H"
 #include "WarpX.H"
 
+#include <ablastr/fields/Interpolate.H>
+#include <ablastr/utils/Communication.H>
+
 #include <AMReX_GpuUtility.H>
 #include <AMReX_ParallelDescriptor.H>
 #include <AMReX_ParmParse.H>
@@ -26,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 
 using namespace amrex;
 
@@ -249,6 +253,212 @@ PrintHallRZParticleDiagnostics (MultiParticleContainer& mpc,
                    << "\n";
 }
 
+amrex::Vector<int>
+ReadHallRZAMRRequestedMCLs (int const max_level)
+{
+    amrex::ParmParse pp("warpx");
+    amrex::Vector<int> mcls;
+    bool const have_per_level = pp.queryarr("hall_rz_max_coarsening_levels", mcls);
+    if (!have_per_level) {
+        int scalar_mcl = 30;
+        pp.query("hall_rz_max_coarsening_level", scalar_mcl);
+        mcls.assign(max_level + 1, std::max(0, scalar_mcl));
+    }
+    if (static_cast<int>(mcls.size()) != max_level + 1) {
+        amrex::Abort(
+            "warpx.hall_rz_max_coarsening_levels must have one entry per HallRZ AMR level.");
+    }
+    for (int& mcl : mcls) {
+        mcl = std::max(0, mcl);
+    }
+    return mcls;
+}
+
+amrex::Real
+ReadHallRZAMRPhiInitWeight ()
+{
+    amrex::ParmParse pp("warpx");
+    amrex::Real weight = amrex::Real(1.0);
+    pp.query("hall_rz_amr_phi_init_weight", weight);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        weight >= amrex::Real(0.0) && weight <= amrex::Real(1.0),
+        "warpx.hall_rz_amr_phi_init_weight must be in [0, 1].");
+    return weight;
+}
+
+void
+InterpolateHallRZPhiBetweenLevels (
+    amrex::MultiFab const& crse_phi,
+    amrex::MultiFab& fine_phi,
+    amrex::Geometry const& crse_geom,
+    amrex::Geometry const& fine_geom,
+    amrex::IntVect const& refratio,
+    amrex::Real const phi_init_weight,
+    bool const fine_phi_history_valid,
+    bool const do_single_precision_comms)
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(crse_phi.nComp() == 1 && fine_phi.nComp() == 1,
+        "HallRZ AMR phi interpolation expects one phi component.");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(crse_phi.ixType().nodeCentered() &&
+                                     fine_phi.ixType().nodeCentered(),
+        "HallRZ AMR phi interpolation expects nodal phi MultiFabs.");
+
+    amrex::BoxArray crse_ba = fine_phi.boxArray();
+    crse_ba.coarsen(refratio);
+    amrex::MultiFab crse_on_fine_dm(crse_ba, fine_phi.DistributionMap(), 1, 0);
+    amrex::MultiFab crse_interp(fine_phi.boxArray(), fine_phi.DistributionMap(), 1, 0);
+
+    ablastr::utils::communication::ParallelCopy(
+        crse_on_fine_dm,
+        crse_phi,
+        0,
+        0,
+        1,
+        amrex::IntVect(0),
+        amrex::IntVect(0),
+        do_single_precision_comms,
+        crse_geom.periodicity());
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (amrex::MFIter mfi(crse_interp, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        auto const fine = crse_interp.array(mfi);
+        auto const crse = crse_on_fine_dm.const_array(mfi);
+        ablastr::fields::details::PoissonInterpCPtoFP const interp(fine, crse, refratio);
+        amrex::ParallelFor(mfi.tilebox(), interp);
+    }
+
+    amrex::BoxArray fine_cell_ba = amrex::convert(
+        fine_phi.boxArray(), amrex::IntVect::TheCellVector());
+    amrex::Box const fine_valid_cell = fine_cell_ba.minimalBox();
+    amrex::Box const fine_domain = fine_geom.Domain();
+    bool const force_rhi = fine_valid_cell.bigEnd(0) < fine_domain.bigEnd(0);
+    bool const force_zhi = fine_valid_cell.bigEnd(1) < fine_domain.bigEnd(1);
+    int const rhi_node = fine_valid_cell.bigEnd(0) + 1;
+    int const zhi_node = fine_valid_cell.bigEnd(1) + 1;
+    amrex::Real const w = fine_phi_history_valid ? phi_init_weight : amrex::Real(0.0);
+    amrex::Real const one_minus_w = amrex::Real(1.0) - w;
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (amrex::MFIter mfi(fine_phi, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        auto const fine = fine_phi.array(mfi);
+        auto const interp = crse_interp.const_array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                bool const artificial_boundary =
+                    (force_rhi && i == rhi_node) || (force_zhi && j == zhi_node);
+                amrex::Real const interp_phi = interp(i,j,k);
+                if (artificial_boundary || w == amrex::Real(0.0)) {
+                    fine(i,j,k) = interp_phi;
+                } else if (w != amrex::Real(1.0)) {
+                    fine(i,j,k) = w * fine(i,j,k) + one_minus_w * interp_phi;
+                }
+            });
+    }
+}
+
+std::string
+HallRZFaceRole (bool const touches_physical, bool const is_low_side)
+{
+    if (touches_physical) {
+        return is_low_side ? "physical-domain-lo" : "physical-domain-hi";
+    }
+    return is_low_side ? "interior-valid-region-lo" : "amr-artificial-hi-coarse-dirichlet";
+}
+
+void
+PrintHallRZAMRDriverSetup (
+    ablastr::fields::MultiLevelScalarField const& rho_fp,
+    ablastr::fields::MultiLevelScalarField const& phi_fp,
+    int const max_level)
+{
+    auto& warpx = WarpX::GetInstance();
+    auto const params = HallRZPoissonSolver::ReadParameters();
+    auto const requested_mcls = ReadHallRZAMRRequestedMCLs(max_level);
+    amrex::Real const phi_init_weight = ReadHallRZAMRPhiInitWeight();
+    int const step = warpx.getistep(0);
+
+    amrex::Print() << "HallRZ AMR driver setup: step=" << step
+                   << ", max_level=" << max_level
+                   << ", solve_order=coarse-to-fine"
+                   << ", level_by_level_poisson=stage3_level_by_level_enabled"
+                   << ", phi_init_weight=" << phi_init_weight
+                   << "\n";
+
+    for (int lev = 0; lev <= max_level; ++lev) {
+        amrex::Geometry const& geom = warpx.Geom(lev);
+        amrex::Box const domain = geom.Domain();
+        amrex::BoxArray const cell_ba =
+            amrex::convert(phi_fp[lev]->boxArray(), amrex::IntVect::TheCellVector());
+        amrex::Box const valid_region = cell_ba.minimalBox();
+        bool const rlo_physical = valid_region.smallEnd(0) == domain.smallEnd(0);
+        bool const rhi_physical = valid_region.bigEnd(0) == domain.bigEnd(0);
+        bool const zlo_physical = valid_region.smallEnd(1) == domain.smallEnd(1);
+        bool const zhi_physical = valid_region.bigEnd(1) == domain.bigEnd(1);
+
+        amrex::Print() << "HallRZ AMR driver setup level=" << lev
+                       << ": requested_mcl=" << requested_mcls[lev]
+                       << ", actual_nmg_levels=reported_by_level_solve"
+                       << ", rho_boxes=" << rho_fp[lev]->boxArray().size()
+                       << ", phi_boxes=" << phi_fp[lev]->boxArray().size()
+                       << ", cell_valid_region=" << valid_region
+                       << ", domain=" << domain
+                       << ", rlo_face=" << HallRZFaceRole(rlo_physical, true)
+                       << ", rhi_face=" << HallRZFaceRole(rhi_physical, false)
+                       << ", zlo_face=" << HallRZFaceRole(zlo_physical, true)
+                       << ", zhi_face=" << HallRZFaceRole(zhi_physical, false)
+                       << ", eb_boundary=HallRZ-EB-FVM-fluid-to-covered"
+                       << ", internal_box_faces=decomposition-only-not-BC"
+                       << "\n";
+    }
+
+    amrex::ignore_unused(params);
+}
+
+void
+ValidateHallRZAMRBoundaryData (HallRZPoissonSolver::Params const& params, int const max_level)
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !HallRZPoissonSolver::HasPythonRobinZHi() &&
+        !HallRZPoissonSolver::HasPythonRobinRHi() &&
+        !HallRZPoissonSolver::HasPythonRobinRLo() &&
+        !HallRZPoissonSolver::HasPythonDirichletRLo() &&
+        !HallRZPoissonSolver::HasPythonInletDirichlet(),
+        "Stage-3.3 HallRZ AMR level-by-level solve supports per-level Python EB "
+        "Neumann/Robin arrays only. Physical domain Python boundary arrays are still "
+        "single-level data and are not supported on the AMR path.");
+
+    if (params.eb_bc_mode == HallRZPoissonSolver::EBBCMode::Robin) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !HallRZPoissonSolver::HasPythonEBNeumann(),
+            "warpx.hall_rz_eb_bc_mode=robin is mutually exclusive with "
+            "hallrz.set_eb_neumann(...).");
+        for (int lev = 0; lev <= max_level; ++lev) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                HallRZPoissonSolver::HasPythonEBRobin(lev),
+                "HallRZ AMR EB Robin mode requires hallrz.set_eb_robin(a,b,f,lev=...) "
+                "for every active AMR level.");
+        }
+    } else {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !HallRZPoissonSolver::HasPythonEBRobin(),
+            "hallrz.set_eb_robin(a,b,f,...) is active but warpx.hall_rz_eb_bc_mode is "
+            "not robin.");
+        if (HallRZPoissonSolver::HasPythonEBNeumann()) {
+            for (int lev = 0; lev <= max_level; ++lev) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    HallRZPoissonSolver::HasPythonEBNeumann(lev),
+                    "HallRZ AMR Python EB Neumann data must be provided for every AMR "
+                    "level, or cleared to use scalar/default EB Neumann data.");
+            }
+        }
+    }
+}
+
 } // namespace
 
 void LabFrameExplicitES::InitData() {
@@ -285,13 +495,48 @@ void LabFrameExplicitES::ComputeSpaceChargeField (
     warpx.SyncRho( rho_fp, rho_cp, amrex::GetVecOfPtrs(rho_buf) );
 
     if (HallRZPoissonSolver::Enabled()) {
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(max_level == 0,
-            "HallRZ W4 currently supports only a single AMR level.");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(max_level >= 0 && max_level <= 2,
+            "HallRZ AMR currently supports amr.max_level=0, 1, or static 2.");
+        if (max_level > 0) {
+            ValidateHallRZAMRBoundaryData(HallRZPoissonSolver::ReadParameters(), max_level);
+            PrintHallRZAMRDriverSetup(rho_fp, phi_fp, max_level);
+            amrex::Vector<int> const requested_mcls = ReadHallRZAMRRequestedMCLs(max_level);
+            amrex::Real const phi_init_weight = ReadHallRZAMRPhiInitWeight();
+            for (int lev = 0; lev <= max_level; ++lev) {
+                amrex::BoxArray cell_grids = amrex::convert(
+                    phi_fp[lev]->boxArray(), amrex::IntVect::TheCellVector());
+                HallRZPoissonSolver::ComputePhiAndE(
+                    *rho_fp[lev],
+                    *phi_fp[lev],
+                    Efield_fp[lev],
+                    warpx.Geom(lev),
+                    cell_grids,
+                    phi_fp[lev]->DistributionMap(),
+                    warpx.fieldEBFactory(lev),
+                    requested_mcls[lev],
+                    lev);
+                if (lev < max_level) {
+                    InterpolateHallRZPhiBetweenLevels(
+                        *phi_fp[lev],
+                        *phi_fp[lev+1],
+                        warpx.Geom(lev),
+                        warpx.Geom(lev+1),
+                        WarpX::RefRatio(lev),
+                        phi_init_weight,
+                        warpx.getistep(0) > 0,
+                        WarpX::do_single_precision_comms);
+                }
+            }
+            PrintHallRZParticleDiagnostics(
+                mpc, HallRZPoissonSolver::ReadParameters(), warpx.Geom(max_level));
+            return;
+        }
         amrex::BoxArray cell_grids = amrex::convert(phi_fp[0]->boxArray(), amrex::IntVect::TheCellVector());
         HallRZPoissonSolver::ComputePhiAndE(*rho_fp[0], *phi_fp[0], Efield_fp[0],
                                             warpx.Geom(0), cell_grids,
                                             phi_fp[0]->DistributionMap(),
-                                            warpx.fieldEBFactory(0));
+                                            warpx.fieldEBFactory(0),
+                                            -1, 0);
         PrintHallRZParticleDiagnostics(mpc, HallRZPoissonSolver::ReadParameters(), warpx.Geom(0));
         return;
     }

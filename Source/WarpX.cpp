@@ -683,6 +683,9 @@ WarpX::ReadParameters ()
         pp_warpx.query("do_subcycling", m_do_subcycling);
         pp_warpx.query("use_hybrid_QED", use_hybrid_QED);
         pp_warpx.query("safe_guard_cells", m_safe_guard_cells);
+        bool hall_rz_enabled = false;
+        pp_warpx.query("hall_rz_enable", hall_rz_enabled);
+        pp_warpx.query("hall_rz_amr_enable", m_hall_rz_amr_enabled);
         std::vector<std::string> override_sync_intervals_string_vec = {"1"};
         pp_warpx.queryarr("override_sync_intervals", override_sync_intervals_string_vec);
         override_sync_intervals =
@@ -1052,30 +1055,196 @@ WarpX::ReadParameters ()
             pp_particles.add("particles_nfiles", particle_io_nfiles);
         }
 
+        amrex::Vector<int> hall_rz_requested_mcls;
+        bool const hall_rz_mcls_specified =
+            pp_warpx.queryarr("hall_rz_max_coarsening_levels", hall_rz_requested_mcls);
+        if (hall_rz_mcls_specified) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !m_hall_rz_amr_enabled ||
+                static_cast<int>(hall_rz_requested_mcls.size()) == maxLevel() + 1,
+                "warpx.hall_rz_max_coarsening_levels must have one entry per active "
+                "HallRZ AMR level.");
+            m_hall_rz_max_coarsening_levels = hall_rz_requested_mcls;
+        } else {
+            int hall_rz_scalar_mcl = 30;
+            pp_warpx.query("hall_rz_max_coarsening_level", hall_rz_scalar_mcl);
+            m_hall_rz_max_coarsening_levels.assign(maxLevel() + 1, hall_rz_scalar_mcl);
+        }
+        for (int const mcl : m_hall_rz_max_coarsening_levels) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                mcl >= 0,
+                "warpx.hall_rz_max_coarsening_levels entries must be non-negative.");
+        }
+
+        if (m_hall_rz_amr_enabled) {
+#ifndef WARPX_DIM_RZ
+            WARPX_ABORT_WITH_MESSAGE("warpx.hall_rz_amr_enable requires a RZ build.");
+#endif
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                hall_rz_enabled,
+                "warpx.hall_rz_amr_enable requires warpx.hall_rz_enable=1.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                maxLevel() == 1 || maxLevel() == 2,
+                "warpx.hall_rz_amr_enable=1 currently requires amr.max_level=1 or 2.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                regrid_int < 0,
+                "warpx.hall_rz_amr_enable=1 only supports static AMR grids. "
+                "Set warpx.regrid_int=-1 and do not regrid during the run.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                utils::parser::queryWithParser(pp_warpx, "hall_rz_amr_r1", m_hall_rz_amr_r1),
+                "warpx.hall_rz_amr_r1 is required when warpx.hall_rz_amr_enable=1.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                utils::parser::queryWithParser(pp_warpx, "hall_rz_amr_z1", m_hall_rz_amr_z1),
+                "warpx.hall_rz_amr_z1 is required when warpx.hall_rz_amr_enable=1.");
+            if (maxLevel() == 2) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    utils::parser::queryWithParser(pp_warpx, "hall_rz_amr_r2",
+                                                   m_hall_rz_amr_r2),
+                    "warpx.hall_rz_amr_r2 is required when warpx.hall_rz_amr_enable=1 "
+                    "and amr.max_level=2.");
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    utils::parser::queryWithParser(pp_warpx, "hall_rz_amr_z2",
+                                                   m_hall_rz_amr_z2),
+                    "warpx.hall_rz_amr_z2 is required when warpx.hall_rz_amr_enable=1 "
+                    "and amr.max_level=2.");
+            }
+
+            for (int lev = 0; lev < maxLevel(); ++lev) {
+                auto const rr = refRatio(lev);
+                for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        rr[idim] == 2,
+                        "warpx.hall_rz_amr_enable=1 requires amr.ref_ratio=2 "
+                        "between HallRZ AMR levels.");
+                }
+            }
+
+            amrex::Real hall_rz_lob = 0.0;
+            amrex::Real hall_rz_hib = 0.0;
+            amrex::Real hall_rz_out = 0.0;
+            amrex::Real hall_rz_align_tol = amrex::Real(1.0e-10);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                utils::parser::queryWithParser(pp_warpx, "hall_rz_lob", hall_rz_lob),
+                "warpx.hall_rz_lob is required when warpx.hall_rz_amr_enable=1.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                utils::parser::queryWithParser(pp_warpx, "hall_rz_hib", hall_rz_hib),
+                "warpx.hall_rz_hib is required when warpx.hall_rz_amr_enable=1.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                utils::parser::queryWithParser(pp_warpx, "hall_rz_out", hall_rz_out),
+                "warpx.hall_rz_out is required when warpx.hall_rz_amr_enable=1.");
+            pp_warpx.query("hall_rz_align_tol", hall_rz_align_tol);
+
+            auto const& geom0 = Geom(0);
+            amrex::Real const rmin = geom0.ProbLo(0);
+            amrex::Real const rmax = geom0.ProbHi(0);
+            amrex::Real const zmin = geom0.ProbLo(1);
+            amrex::Real const zmax = geom0.ProbHi(1);
+            if (maxLevel() == 1) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    zmin < hall_rz_out && hall_rz_out < m_hall_rz_amr_z1 &&
+                    m_hall_rz_amr_z1 < zmax,
+                    "Two-level HallRZ AMR requires zmin < hall_rz_out < "
+                    "hall_rz_amr_z1 < zmax.");
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    rmin <= hall_rz_lob && hall_rz_lob < hall_rz_hib &&
+                    hall_rz_hib < m_hall_rz_amr_r1 && m_hall_rz_amr_r1 < rmax,
+                    "Two-level HallRZ AMR requires rmin <= hall_rz_lob < hall_rz_hib "
+                    "< hall_rz_amr_r1 < rmax.");
+            } else {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    zmin < hall_rz_out && hall_rz_out < m_hall_rz_amr_z2 &&
+                    m_hall_rz_amr_z2 < m_hall_rz_amr_z1 && m_hall_rz_amr_z1 < zmax,
+                    "Three-level HallRZ AMR requires zmin < hall_rz_out < hall_rz_amr_z2 "
+                    "< hall_rz_amr_z1 < zmax.");
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    rmin <= hall_rz_lob && hall_rz_lob < hall_rz_hib &&
+                    hall_rz_hib < m_hall_rz_amr_r2 &&
+                    m_hall_rz_amr_r2 < m_hall_rz_amr_r1 && m_hall_rz_amr_r1 < rmax,
+                    "Three-level HallRZ AMR requires rmin <= hall_rz_lob < hall_rz_hib "
+                    "< hall_rz_amr_r2 < hall_rz_amr_r1 < rmax.");
+            }
+
+            auto on_face = [hall_rz_align_tol] (amrex::Real x, amrex::Real lo,
+                                                amrex::Real dx) {
+                amrex::Real const idx = (x - lo) / dx;
+                return std::abs(idx - std::round(idx)) < hall_rz_align_tol;
+            };
+            auto const dx0 = geom0.CellSizeArray();
+            amrex::Real const dr1 = dx0[0] / refRatio(0)[0];
+            amrex::Real const dz1 = dx0[1] / refRatio(0)[1];
+            if (maxLevel() == 1) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    on_face(m_hall_rz_amr_r1, rmin, dx0[0]) &&
+                    on_face(m_hall_rz_amr_z1, zmin, dx0[1]) &&
+                    on_face(hall_rz_lob, rmin, dr1) &&
+                    on_face(hall_rz_hib, rmin, dr1) &&
+                    on_face(hall_rz_out, zmin, dz1),
+                    "Two-level HallRZ AMR requires r1/z1 on level-0 faces and "
+                    "hall_rz_lob/hall_rz_hib/hall_rz_out on level-1 faces.");
+            } else {
+                amrex::Real const dr2 = dr1 / refRatio(1)[0];
+                amrex::Real const dz2 = dz1 / refRatio(1)[1];
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    on_face(m_hall_rz_amr_r1, rmin, dx0[0]) &&
+                    on_face(m_hall_rz_amr_z1, zmin, dx0[1]) &&
+                    on_face(m_hall_rz_amr_r2, rmin, dr1) &&
+                    on_face(m_hall_rz_amr_z2, zmin, dz1) &&
+                    on_face(hall_rz_lob, rmin, dr2) &&
+                    on_face(hall_rz_hib, rmin, dr2) &&
+                    on_face(hall_rz_out, zmin, dz2),
+                    "Three-level HallRZ AMR requires r1/z1 on level-0 faces, r2/z2 on "
+                    "level-1 faces, and hall_rz_lob/hall_rz_hib/hall_rz_out on "
+                    "level-2 faces.");
+            }
+
+            fine_tag_lo = amrex::RealVect{AMREX_D_DECL(rmin, zmin, amrex::Real(0.0))};
+            fine_tag_hi = amrex::RealVect{AMREX_D_DECL(m_hall_rz_amr_r1,
+                                                       m_hall_rz_amr_z1,
+                                                       amrex::Real(0.0))};
+        } else if (hall_rz_mcls_specified) {
+            WARPX_ABORT_WITH_MESSAGE(
+                "warpx.hall_rz_max_coarsening_levels is only valid with "
+                "warpx.hall_rz_amr_enable=1. Use scalar warpx.hall_rz_max_coarsening_level "
+                "for single-level HallRZ.");
+        }
+        if (hall_rz_enabled && !m_hall_rz_amr_enabled) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                maxLevel() == 0,
+                "HallRZ Poisson currently supports amr.max_level=0 unless "
+                "warpx.hall_rz_amr_enable=1 is used for Stage-2 grid validation.");
+        }
+
         if (maxLevel() > 0) {
             Vector<Real> lo, hi;
             const bool fine_tag_lo_specified = utils::parser::queryArrWithParser(pp_warpx, "fine_tag_lo", lo);
             const bool fine_tag_hi_specified = utils::parser::queryArrWithParser(pp_warpx, "fine_tag_hi", hi);
             std::string ref_patch_function;
             const bool parser_specified = pp_warpx.query("ref_patch_function(x,y,z)",ref_patch_function);
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE( ((fine_tag_lo_specified && fine_tag_hi_specified) ||
+            if (m_hall_rz_amr_enabled) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    !fine_tag_lo_specified && !fine_tag_hi_specified && !parser_specified,
+                    "warpx.hall_rz_amr_enable=1 owns HallRZ AMR tagging. Do not also set "
+                    "warpx.fine_tag_lo, warpx.fine_tag_hi, or warpx.ref_patch_function(x,y,z).");
+            } else {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE( ((fine_tag_lo_specified && fine_tag_hi_specified) ||
                                                 parser_specified ),
                                                 "For max_level > 0, you need to either set\
                                                 warpx.fine_tag_lo and warpx.fine_tag_hi\
                                                 or warpx.ref_patch_function(x,y,z)");
 
-            if ( (fine_tag_lo_specified && fine_tag_hi_specified) && parser_specified) {
-               ablastr::warn_manager::WMRecordWarning("Refined patch", "Both fine_tag_lo,fine_tag_hi\
-                   and ref_patch_function(x,y,z) are provided. Note that fine_tag_lo/fine_tag_hi will\
-                   override the ref_patch_function(x,y,z) for defining the refinement patches");
-            }
-            if (fine_tag_lo_specified && fine_tag_hi_specified) {
-                fine_tag_lo = RealVect{lo};
-                fine_tag_hi = RealVect{hi};
-            } else {
-                utils::parser::Store_parserString(pp_warpx, "ref_patch_function(x,y,z)", ref_patch_function);
-                ref_patch_parser = std::make_unique<amrex::Parser>(
-                    utils::parser::makeParser(ref_patch_function,{"x","y","z"}));
+                if ( (fine_tag_lo_specified && fine_tag_hi_specified) && parser_specified) {
+                   ablastr::warn_manager::WMRecordWarning("Refined patch", "Both fine_tag_lo,fine_tag_hi\
+                       and ref_patch_function(x,y,z) are provided. Note that fine_tag_lo/fine_tag_hi will\
+                       override the ref_patch_function(x,y,z) for defining the refinement patches");
+                }
+                if (fine_tag_lo_specified && fine_tag_hi_specified) {
+                    fine_tag_lo = RealVect{lo};
+                    fine_tag_hi = RealVect{hi};
+                } else {
+                    utils::parser::Store_parserString(pp_warpx, "ref_patch_function(x,y,z)", ref_patch_function);
+                    ref_patch_parser = std::make_unique<amrex::Parser>(
+                        utils::parser::makeParser(ref_patch_function,{"x","y","z"}));
+                }
             }
         }
 
@@ -3405,6 +3574,11 @@ WarpX::ErrorEst (int lev, TagBoxArray& tags, Real /*time*/, int /*ngrow*/)
     if (ref_patch_parser) { ref_parser = ref_patch_parser->compile<3>(); }
     const auto ftlo = fine_tag_lo;
     const auto fthi = fine_tag_hi;
+    const bool hall_rz_amr_enabled = m_hall_rz_amr_enabled;
+    const bool hall_rz_tag_level = hall_rz_amr_enabled && lev < maxLevel();
+    const Real hall_rz_tag_rhi = (lev == 0) ? m_hall_rz_amr_r1 : m_hall_rz_amr_r2;
+    const Real hall_rz_tag_zhi = (lev == 0) ? m_hall_rz_amr_z1 : m_hall_rz_amr_z2;
+    constexpr Real hall_rz_tag_tol = Real(1.0e-12);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -3418,7 +3592,17 @@ WarpX::ErrorEst (int lev, TagBoxArray& tags, Real /*time*/, int /*ngrow*/)
                                        (j+0.5_rt)*dx[1]+problo[1],
                                        (k+0.5_rt)*dx[2]+problo[2])};
             bool tag_val = false;
-            if (ref_parser) {
+            if (hall_rz_amr_enabled) {
+#if defined (WARPX_DIM_RZ)
+                tag_val = hall_rz_tag_level &&
+                    (pos[0] >= problo[0] - hall_rz_tag_tol) &&
+                    (pos[1] >= problo[1] - hall_rz_tag_tol) &&
+                    (pos[0] <= hall_rz_tag_rhi + hall_rz_tag_tol) &&
+                    (pos[1] <= hall_rz_tag_zhi + hall_rz_tag_tol);
+#else
+                tag_val = false;
+#endif
+            } else if (ref_parser) {
 #if defined (WARPX_DIM_3D)
                 tag_val = (ref_parser(pos[0], pos[1], pos[2]) == 1);
 #elif defined (WARPX_DIM_XZ) || defined (WARPX_DIM_RZ)

@@ -121,15 +121,17 @@ WarpX::InitEB ()
         amrex::Real const zlo = eb_geom.ProbLo(1);
         amrex::Real const zhi = eb_geom.ProbHi(1);
 
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(std::abs(rlo) < 10.0 * std::numeric_limits<amrex::Real>::epsilon(),
-                                         "HallRZ requires r_min=0.");
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(rlo < lob && lob < hib && hib < rhi,
-                                         "HallRZ requires r_min < lob < hib < r_max.");
+        amrex::Real align_tol = amrex::Real(1.0e-10);
+        pp_warpx.query("hall_rz_align_tol", align_tol);
+
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(rlo >= amrex::Real(0.0),
+                                         "HallRZ requires r_min >= 0.");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(rlo <= lob + align_tol &&
+                                         lob < hib && hib < rhi,
+                                         "HallRZ requires r_min <= lob < hib < r_max.");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(zlo < out && out < zhi,
                                          "HallRZ requires z_min < out < z_max.");
 
-        amrex::Real align_tol = amrex::Real(1.0e-10);
-        pp_warpx.query("hall_rz_align_tol", align_tol);
         auto is_aligned = [align_tol] (amrex::Real x, amrex::Real xlo, amrex::Real dx) noexcept {
             amrex::Real const idx = (x - xlo) / dx;
             return std::abs(idx - std::round(idx)) < align_tol;
@@ -139,24 +141,40 @@ WarpX::InitEB ()
                                          is_aligned(hib, rlo, dx[0]) &&
                                          is_aligned(out, zlo, dx[1]),
                                          "HallRZ lob/hib/out must lie exactly on cell faces.");
+        auto snap_to_face = [] (amrex::Real x, amrex::Real xlo, amrex::Real h) noexcept {
+            return xlo + std::round((x - xlo) / h) * h;
+        };
+        amrex::Real const lob_face = snap_to_face(lob, rlo, dx[0]);
+        amrex::Real const hib_face = snap_to_face(hib, rlo, dx[0]);
+        amrex::Real const out_face = snap_to_face(out, zlo, dx[1]);
 
         amrex::Real delta_box = std::max(rhi-rlo, zhi-zlo);
         pp_warpx.query("hall_rz_box_delta", delta_box);
         delta_box = std::max(delta_box, amrex::Real(10.0) * std::max(dx[0], dx[1]));
 
-        amrex::EB2::BoxIF low(
-            {AMREX_D_DECL(rlo-delta_box, zlo-delta_box, amrex::Real(-1.0))},
-            {AMREX_D_DECL(lob,           out,            amrex::Real( 1.0))}, false);
         amrex::EB2::BoxIF high(
-            {AMREX_D_DECL(hib,           zlo-delta_box, amrex::Real(-1.0))},
-            {AMREX_D_DECL(rhi+delta_box, out,            amrex::Real( 1.0))}, false);
-        auto hall_body = amrex::EB2::makeUnion(low, high);
-        auto hall_shop = amrex::EB2::makeShop(hall_body);
-        amrex::EB2::Build(hall_shop, Geom(maxLevel()), maxLevel(), maxLevel()+20);
+            {AMREX_D_DECL(hib_face,      zlo-delta_box, amrex::Real(-1.0))},
+            {AMREX_D_DECL(rhi+delta_box, out_face,       amrex::Real( 1.0))}, false);
+        bool const low_block_exists = lob_face > rlo + align_tol;
+        if (low_block_exists) {
+            amrex::EB2::BoxIF low(
+                {AMREX_D_DECL(rlo-delta_box, zlo-delta_box, amrex::Real(-1.0))},
+                {AMREX_D_DECL(lob_face,      out_face,       amrex::Real( 1.0))}, false);
+            auto hall_body = amrex::EB2::makeUnion(low, high);
+            auto hall_shop = amrex::EB2::makeShop(hall_body);
+            amrex::EB2::Build(hall_shop, Geom(maxLevel()), maxLevel(), maxLevel()+20);
+        } else {
+            auto hall_shop = amrex::EB2::makeShop(high);
+            amrex::EB2::Build(hall_shop, Geom(maxLevel()), maxLevel(), maxLevel()+20);
+        }
 
         if (Verbose()) {
             amrex::Print() << "HallRZ EB initialized by WarpX::InitEB: lob=" << lob
                            << ", hib=" << hib << ", out=" << out
+                           << ", lob_face=" << lob_face
+                           << ", hib_face=" << hib_face
+                           << ", out_face=" << out_face
+                           << ", low_block_exists=" << low_block_exists
                            << ", delta_box=" << delta_box << "\n";
         }
         return;

@@ -15,6 +15,7 @@
 #include <Utils/WarpXVersion.H>
 #include <Initialization/WarpXAMReXInit.H>
 
+#include <tuple>
 #include <vector>
 
 #define STRINGIFY(x) #x
@@ -142,7 +143,7 @@ PYBIND11_MODULE(PYWARPX_MODULE_NAME, m) {
 
 #if defined(WARPX_DIM_RZ)
     m.def("hallrz_set_eb_neumann",
-        [](py::array const& arr)
+        [](py::array const& arr, int const lev)
         {
             if (arr.ndim() != 2) {
                 throw std::runtime_error("hallrz.set_eb_neumann expects a 2D NumPy array with shape (Nr,Nz).");
@@ -163,18 +164,69 @@ PYBIND11_MODULE(PYWARPX_MODULE_NAME, m) {
                     data[static_cast<std::size_t>(i) * static_cast<std::size_t>(nz) + static_cast<std::size_t>(j)] = g(i,j);
                 }
             }
-            HallRZPoissonSolver::SetPythonEBNeumann(nr, nz, std::move(data));
+            HallRZPoissonSolver::SetPythonEBNeumann(nr, nz, std::move(data), lev);
         },
-        py::arg("g_eb"),
-        "Set persistent HallRZ cell-centered EB Neumann data from a float64 C-contiguous array with shape (Nr,Nz).");
+        py::arg("g_eb"), py::arg("lev") = 0,
+        "Set persistent HallRZ cell-centered EB Neumann data for one AMR level.");
 
     m.def("hallrz_clear_eb_neumann",
-        []() { HallRZPoissonSolver::ClearPythonEBNeumann(); },
-        "Clear persistent HallRZ Python EB Neumann data.");
+        [](int const lev) { HallRZPoissonSolver::ClearPythonEBNeumann(lev); },
+        py::arg("lev") = -1,
+        "Clear persistent HallRZ Python EB Neumann data. lev=-1 clears all levels.");
 
     m.def("hallrz_has_eb_neumann",
-        []() { return HallRZPoissonSolver::HasPythonEBNeumann(); },
+        [](int const lev) { return HallRZPoissonSolver::HasPythonEBNeumann(lev); },
+        py::arg("lev") = -1,
         "Return True if persistent HallRZ Python EB Neumann data is active.");
+
+    auto copy_2d_real_array = [] (py::array const& arr, char const* name)
+    {
+        if (arr.ndim() != 2) {
+            throw std::runtime_error(std::string(name) + " expects a 2D NumPy array with shape (Nr,Nz).");
+        }
+        if (!arr.dtype().is(py::dtype::of<amrex::Real>())) {
+            throw std::runtime_error(std::string(name) + " expects dtype float64.");
+        }
+        if ((arr.flags() & py::array::c_style) == 0) {
+            throw std::runtime_error(std::string(name) + " expects a C-contiguous array.");
+        }
+        int const nr = static_cast<int>(arr.shape(0));
+        int const nz = static_cast<int>(arr.shape(1));
+        auto const a = py::array_t<amrex::Real>(arr).unchecked<2>();
+        std::vector<amrex::Real> data(static_cast<std::size_t>(nr) * static_cast<std::size_t>(nz));
+        for (int i = 0; i < nr; ++i) {
+            for (int j = 0; j < nz; ++j) {
+                data[static_cast<std::size_t>(i) * static_cast<std::size_t>(nz) + static_cast<std::size_t>(j)] = a(i,j);
+            }
+        }
+        return std::tuple<int, int, std::vector<amrex::Real>>(nr, nz, std::move(data));
+    };
+
+    m.def("hallrz_set_eb_robin",
+        [copy_2d_real_array](py::array const& a, py::array const& b, py::array const& f,
+                             int const lev)
+        {
+            auto [nr, nz, avec] = copy_2d_real_array(a, "hallrz.set_eb_robin(a)");
+            auto [bnr, bnz, bvec] = copy_2d_real_array(b, "hallrz.set_eb_robin(b)");
+            auto [fnr, fnz, fvec] = copy_2d_real_array(f, "hallrz.set_eb_robin(f)");
+            if (bnr != nr || bnz != nz || fnr != nr || fnz != nz) {
+                throw std::runtime_error("hallrz.set_eb_robin expects a, b, and f to have the same shape.");
+            }
+            HallRZPoissonSolver::SetPythonEBRobin(
+                nr, nz, std::move(avec), std::move(bvec), std::move(fvec), lev);
+        },
+        py::arg("a"), py::arg("b"), py::arg("f"), py::arg("lev") = 0,
+        "Set persistent HallRZ EB-FVM Robin data for one AMR level.");
+
+    m.def("hallrz_clear_eb_robin",
+        [](int const lev) { HallRZPoissonSolver::ClearPythonEBRobin(lev); },
+        py::arg("lev") = -1,
+        "Clear persistent HallRZ Python EB Robin data. lev=-1 clears all levels.");
+
+    m.def("hallrz_has_eb_robin",
+        [](int const lev) { return HallRZPoissonSolver::HasPythonEBRobin(lev); },
+        py::arg("lev") = -1,
+        "Return True if persistent HallRZ Python EB Robin data is active.");
 
     auto copy_1d_real_array = [] (py::array const& arr, char const* name)
     {
@@ -241,6 +293,47 @@ PYBIND11_MODULE(PYWARPX_MODULE_NAME, m) {
     m.def("hallrz_has_robin_rhi",
         []() { return HallRZPoissonSolver::HasPythonRobinRHi(); },
         "Return True if persistent HallRZ Python r-hi Robin data is active.");
+
+    m.def("hallrz_set_robin_rlo",
+        [copy_1d_real_array](py::array const& a, py::array const& b, py::array const& f)
+        {
+            auto avec = copy_1d_real_array(a, "hallrz.set_robin_rlo(a)");
+            int const n = static_cast<int>(avec.size());
+            auto bvec = copy_1d_real_array(b, "hallrz.set_robin_rlo(b)");
+            auto fvec = copy_1d_real_array(f, "hallrz.set_robin_rlo(f)");
+            if (static_cast<int>(bvec.size()) != n || static_cast<int>(fvec.size()) != n) {
+                throw std::runtime_error("hallrz.set_robin_rlo expects a, b, and f to have the same shape.");
+            }
+            HallRZPoissonSolver::SetPythonRobinRLo(n, std::move(avec), std::move(bvec), std::move(fvec));
+        },
+        py::arg("a"), py::arg("b"), py::arg("f"),
+        "Set persistent HallRZ r-lo Robin data from float64 C-contiguous arrays with shape (Nz+1).");
+
+    m.def("hallrz_clear_robin_rlo",
+        []() { HallRZPoissonSolver::ClearPythonRobinRLo(); },
+        "Clear persistent HallRZ Python r-lo Robin data.");
+
+    m.def("hallrz_has_robin_rlo",
+        []() { return HallRZPoissonSolver::HasPythonRobinRLo(); },
+        "Return True if persistent HallRZ Python r-lo Robin data is active.");
+
+    m.def("hallrz_set_dirichlet_rlo",
+        [copy_1d_real_array](py::array const& phi)
+        {
+            auto data = copy_1d_real_array(phi, "hallrz.set_dirichlet_rlo(phi)");
+            int const n = static_cast<int>(data.size());
+            HallRZPoissonSolver::SetPythonDirichletRLo(n, std::move(data));
+        },
+        py::arg("phi"),
+        "Set persistent HallRZ r-lo Dirichlet data from a float64 C-contiguous array with shape (Nz+1).");
+
+    m.def("hallrz_clear_dirichlet_rlo",
+        []() { HallRZPoissonSolver::ClearPythonDirichletRLo(); },
+        "Clear persistent HallRZ Python r-lo Dirichlet data.");
+
+    m.def("hallrz_has_dirichlet_rlo",
+        []() { return HallRZPoissonSolver::HasPythonDirichletRLo(); },
+        "Return True if persistent HallRZ Python r-lo Dirichlet data is active.");
 
     m.def("hallrz_set_inlet_dirichlet",
         [copy_1d_real_array](py::array const& phi)

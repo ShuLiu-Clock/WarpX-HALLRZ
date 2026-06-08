@@ -29,6 +29,7 @@
 #include "Fluids/MultiFluidContainer.H"
 #include "Fluids/WarpXFluidContainer.H"
 #include "Particles/ParticleBoundaryBuffer.H"
+#include "Particles/Pusher/GetAndSetPosition.H"
 #include "Python/callbacks.H"
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXAlgorithmSelection.H"
@@ -45,17 +46,29 @@
 #include <AMReX_Geometry.H>
 #include <AMReX_IntVect.H>
 #include <AMReX_LayoutData.H>
+#include <AMReX_Math.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_ParmParse.H>
+#include <AMReX_ParallelDescriptor.H>
+#include <AMReX_Particle.H>
 #include <AMReX_Print.H>
 #include <AMReX_REAL.H>
+#include <AMReX_Reduce.H>
 #include <AMReX_Utility.H>
 #include <AMReX_Vector.H>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <limits>
 #include <memory>
 #include <ostream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using namespace amrex;
@@ -105,6 +118,339 @@ namespace
                     *fields.get(FieldType::current_store, dir, lev)
                 );
             }
+        }
+    }
+
+    bool DsmcInvalidParticleDiagEnabled ()
+    {
+        static int enabled = -1;
+        if (enabled < 0) {
+            enabled = 0;
+            if (char const* env = std::getenv("XU_DSMC_INVALID_DIAG")) {
+                enabled = std::atoi(env);
+            } else {
+                amrex::ParmParse const pp_warpx("warpx");
+                pp_warpx.query("dsmc_invalid_particle_diag", enabled);
+            }
+        }
+        return enabled != 0;
+    }
+
+    bool DsmcInvalidParticleDiagPrintClean ()
+    {
+        static int print_clean = -1;
+        if (print_clean < 0) {
+            print_clean = 0;
+            if (char const* env = std::getenv("XU_DSMC_INVALID_DIAG_PRINT_CLEAN")) {
+                print_clean = std::atoi(env);
+            } else {
+                amrex::ParmParse const pp_warpx("warpx");
+                pp_warpx.query("dsmc_invalid_particle_diag_print_clean", print_clean);
+            }
+        }
+        return print_clean != 0;
+    }
+
+    bool DsmcInvalidParticleDiagShouldRun (int step)
+    {
+        if (!DsmcInvalidParticleDiagEnabled()) {
+            return false;
+        }
+
+        static int interval = -1;
+        if (interval < 0) {
+            interval = 101;
+            if (char const* env = std::getenv("XU_DSMC_INVALID_DIAG_INTERVAL")) {
+                interval = std::atoi(env);
+            } else {
+                amrex::ParmParse const pp_warpx("warpx");
+                pp_warpx.query("dsmc_invalid_particle_diag_interval", interval);
+            }
+            interval = std::max(interval, 1);
+        }
+
+        return (step < 0) || (step % interval == 0) ||
+               (step > 0 && ((step - 1) % interval == 0));
+    }
+
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    int DsmcInvalidParticleBadBits (
+        amrex::ParticleReal stored_x, amrex::ParticleReal stored_y,
+        amrex::ParticleReal stored_z, amrex::ParticleReal cart_x,
+        amrex::ParticleReal cart_y, amrex::ParticleReal cart_z,
+        amrex::ParticleReal w, amrex::ParticleReal ux,
+        amrex::ParticleReal uy, amrex::ParticleReal uz) noexcept
+    {
+        int bits = 0;
+        if (!amrex::Math::isfinite(stored_x) || !amrex::Math::isfinite(stored_y) ||
+            !amrex::Math::isfinite(stored_z)) {
+            bits |= 1;
+        }
+        if (!amrex::Math::isfinite(cart_x) || !amrex::Math::isfinite(cart_y) ||
+            !amrex::Math::isfinite(cart_z)) {
+            bits |= 2;
+        }
+        if (!amrex::Math::isfinite(ux) || !amrex::Math::isfinite(uy) ||
+            !amrex::Math::isfinite(uz)) {
+            bits |= 4;
+        }
+        if (!amrex::Math::isfinite(w)) {
+            bits |= 8;
+        }
+        if (!(w > 0._prt)) {
+            bits |= 16;
+        }
+#if defined(WARPX_DIM_RZ)
+        if (stored_x < 0._prt) {
+            bits |= 32;
+        }
+#endif
+        return bits;
+    }
+
+    struct DsmcInvalidParticleSample
+    {
+        int found = 0;
+        int reason = 0;
+        int lev = -1;
+        int grid = -1;
+        int ip = -1;
+        std::uint64_t idcpu = 0;
+        amrex::ParticleReal stored_x = 0._prt;
+        amrex::ParticleReal stored_y = 0._prt;
+        amrex::ParticleReal stored_z = 0._prt;
+        amrex::ParticleReal cart_x = 0._prt;
+        amrex::ParticleReal cart_y = 0._prt;
+        amrex::ParticleReal cart_z = 0._prt;
+        amrex::ParticleReal w = 0._prt;
+        amrex::ParticleReal ux = 0._prt;
+        amrex::ParticleReal uy = 0._prt;
+        amrex::ParticleReal uz = 0._prt;
+    };
+
+    void DsmcInvalidParticleDiag (
+        std::unique_ptr<MultiParticleContainer> const& mypc, char const* label, int step)
+    {
+        if (!DsmcInvalidParticleDiagShouldRun(step)) {
+            return;
+        }
+
+        // [SHULIU-CODEX-DIAG:dsmc-invalid:20260513]
+        auto const names = mypc->GetSpeciesAndLasersNames();
+        amrex::Long local_bad_total = 0;
+        amrex::Long local_valid_total = 0;
+
+        for (int ispecies = 0; ispecies < mypc->nContainers(); ++ispecies) {
+            auto& pc = mypc->GetParticleContainer(ispecies);
+            amrex::Long local_bad = 0;
+            amrex::Long local_valid = 0;
+            DsmcInvalidParticleSample sample;
+
+            for (int lev = 0; lev <= pc.finestLevel(); ++lev) {
+                for (WarpXParIter pti(pc, lev); pti.isValid(); ++pti) {
+                    auto const& ptile = pti.GetParticleTile();
+                    auto const np = static_cast<int>(ptile.numParticles());
+                    if (np == 0) {
+                        continue;
+                    }
+
+                    auto const ptd = ptile.getConstParticleTileData();
+                    auto const get_position = GetParticlePosition<PIdx>(pti);
+
+                    amrex::ReduceOps<
+                        amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpMin> reduce_ops;
+                    amrex::ReduceData<amrex::Long, amrex::Long, int> reduce_data(reduce_ops);
+                    using ReduceTuple = typename decltype(reduce_data)::Type;
+                    int const no_bad = std::numeric_limits<int>::max();
+
+                    reduce_ops.eval(np, reduce_data,
+                    [=] AMREX_GPU_DEVICE (int ip) noexcept -> ReduceTuple
+                    {
+                        if (!ptd.id(ip).is_valid()) {
+                            return {amrex::Long(0), amrex::Long(0), no_bad};
+                        }
+
+                        amrex::ParticleReal stored_x = 0._prt;
+                        amrex::ParticleReal stored_y = 0._prt;
+                        amrex::ParticleReal stored_z = 0._prt;
+                        amrex::ParticleReal cart_x = 0._prt;
+                        amrex::ParticleReal cart_y = 0._prt;
+                        amrex::ParticleReal cart_z = 0._prt;
+                        get_position.AsStored(ip, stored_x, stored_y, stored_z);
+                        get_position(ip, cart_x, cart_y, cart_z);
+
+                        auto const bad_bits = DsmcInvalidParticleBadBits(
+                            stored_x, stored_y, stored_z, cart_x, cart_y, cart_z,
+                            ptd.rdata(PIdx::w)[ip], ptd.rdata(PIdx::ux)[ip],
+                            ptd.rdata(PIdx::uy)[ip], ptd.rdata(PIdx::uz)[ip]);
+
+                        return {amrex::Long(1), bad_bits ? amrex::Long(1) : amrex::Long(0),
+                                bad_bits ? ip : no_bad};
+                    });
+
+                    auto const hv = reduce_data.value(reduce_ops);
+                    amrex::Long const tile_valid = amrex::get<0>(hv);
+                    amrex::Long const tile_bad = amrex::get<1>(hv);
+                    int const first_bad_ip = amrex::get<2>(hv);
+
+                    local_valid += tile_valid;
+                    local_bad += tile_bad;
+
+                    if (tile_bad > 0 && sample.found == 0 && first_bad_ip != no_bad) {
+                        sample.found = 1;
+                        sample.lev = lev;
+                        sample.grid = pti.index();
+                        sample.ip = first_bad_ip;
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.idcpu, ptd.m_idcpu + first_bad_ip, sizeof(std::uint64_t));
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.w, ptd.rdata(PIdx::w) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.ux, ptd.rdata(PIdx::ux) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.uy, ptd.rdata(PIdx::uy) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.uz, ptd.rdata(PIdx::uz) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+#if defined(WARPX_DIM_RZ)
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.stored_x, ptd.rdata(PIdx::x) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.stored_z, ptd.rdata(PIdx::z) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.stored_y, ptd.rdata(PIdx::theta) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        sample.cart_x = sample.stored_x * std::cos(sample.stored_y);
+                        sample.cart_y = sample.stored_x * std::sin(sample.stored_y);
+                        sample.cart_z = sample.stored_z;
+#elif defined(WARPX_DIM_3D)
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.stored_x, ptd.rdata(PIdx::x) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.stored_y, ptd.rdata(PIdx::y) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.stored_z, ptd.rdata(PIdx::z) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        sample.cart_x = sample.stored_x;
+                        sample.cart_y = sample.stored_y;
+                        sample.cart_z = sample.stored_z;
+#elif defined(WARPX_DIM_XZ)
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.stored_x, ptd.rdata(PIdx::x) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.stored_z, ptd.rdata(PIdx::z) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        sample.stored_y = 0._prt;
+                        sample.cart_x = sample.stored_x;
+                        sample.cart_y = 0._prt;
+                        sample.cart_z = sample.stored_z;
+#elif defined(WARPX_DIM_1D_Z)
+                        amrex::Gpu::dtoh_memcpy(
+                            &sample.stored_z, ptd.rdata(PIdx::z) + first_bad_ip,
+                            sizeof(amrex::ParticleReal));
+                        sample.stored_x = 0._prt;
+                        sample.stored_y = 0._prt;
+                        sample.cart_x = 0._prt;
+                        sample.cart_y = 0._prt;
+                        sample.cart_z = sample.stored_z;
+#endif
+                        sample.reason = DsmcInvalidParticleBadBits(
+                            sample.stored_x, sample.stored_y, sample.stored_z,
+                            sample.cart_x, sample.cart_y, sample.cart_z,
+                            sample.w, sample.ux, sample.uy, sample.uz);
+                    }
+                }
+            }
+
+            local_bad_total += local_bad;
+            local_valid_total += local_valid;
+
+            if (local_bad > 0) {
+                int const rank = amrex::ParallelDescriptor::MyProc();
+                auto const& species_name = names[ispecies];
+                amrex::AllPrint()
+                    << "[SHULIU-CODEX-DIAG:dsmc-invalid:20260513] "
+                    << "HALLRZ_DSMC_INVALID_PARTICLE"
+                    << " rank= " << rank
+                    << " step= " << step
+                    << " label= " << label
+                    << " species= " << species_name
+                    << " bad= " << local_bad
+                    << " valid= " << local_valid
+                    << " reason_bits= " << sample.reason
+                    << " first_lev= " << sample.lev
+                    << " first_grid= " << sample.grid
+                    << " first_ip= " << sample.ip
+                    << " idcpu= " << sample.idcpu
+                    << " stored_x= " << sample.stored_x
+                    << " stored_y= " << sample.stored_y
+                    << " stored_z= " << sample.stored_z
+                    << " x= " << sample.cart_x
+                    << " y= " << sample.cart_y
+                    << " z= " << sample.cart_z
+                    << " w= " << sample.w
+                    << " ux= " << sample.ux
+                    << " uy= " << sample.uy
+                    << " uz= " << sample.uz
+                    << "\n";
+
+                std::ostringstream filename;
+                filename << "dsmc_invalid_particle_rank" << std::setw(6) << std::setfill('0')
+                         << rank << "_step" << std::setw(10) << step
+                         << "_" << label << "_" << species_name << ".txt";
+                std::ofstream ofs(filename.str(), std::ios::out);
+                ofs << "[SHULIU-CODEX-DIAG:dsmc-invalid:20260513]\n"
+                    << "rank " << rank << "\n"
+                    << "step " << step << "\n"
+                    << "label " << label << "\n"
+                    << "species " << species_name << "\n"
+                    << "bad " << local_bad << "\n"
+                    << "valid " << local_valid << "\n"
+                    << "reason_bits " << sample.reason << "\n"
+                    << "first_lev " << sample.lev << "\n"
+                    << "first_grid " << sample.grid << "\n"
+                    << "first_ip " << sample.ip << "\n"
+                    << "idcpu " << sample.idcpu << "\n"
+                    << "stored_x " << sample.stored_x << "\n"
+                    << "stored_y " << sample.stored_y << "\n"
+                    << "stored_z " << sample.stored_z << "\n"
+                    << "x " << sample.cart_x << "\n"
+                    << "y " << sample.cart_y << "\n"
+                    << "z " << sample.cart_z << "\n"
+                    << "w " << sample.w << "\n"
+                    << "ux " << sample.ux << "\n"
+                    << "uy " << sample.uy << "\n"
+                    << "uz " << sample.uz << "\n";
+            }
+        }
+
+        amrex::Long global_bad = local_bad_total;
+        amrex::Long global_valid = local_valid_total;
+        amrex::ParallelDescriptor::ReduceLongSum(global_bad);
+        amrex::ParallelDescriptor::ReduceLongSum(global_valid);
+
+        if (global_bad > 0 || DsmcInvalidParticleDiagPrintClean()) {
+            amrex::Print()
+                << "[SHULIU-CODEX-DIAG:dsmc-invalid:20260513] "
+                << "HALLRZ_DSMC_INVALID_SUMMARY"
+                << " step= " << step
+                << " label= " << label
+                << " bad= " << global_bad
+                << " valid= " << global_valid
+                << "\n";
+        }
+
+        if (global_bad > 0) {
+            amrex::ParallelDescriptor::Barrier();
+            amrex::Abort("HALLRZ_DSMC_INVALID_PARTICLE detected before AMReX locate/sort");
         }
     }
 }
@@ -227,9 +573,11 @@ WarpX::Evolve (int numsteps)
 
         // perform particle injection
         ExecutePythonCallback("particleinjection");
+        DsmcInvalidParticleDiag(mypc, "after_particleinjection", step);
 
         // perform collisions and advance fields and particles by one time step
         OneStep(cur_time, dt[0], step);
+        DsmcInvalidParticleDiag(mypc, "afteronestep", step);
 
         // Resample particles
         // +1 is necessary here because value of step seen by user (first step is 1) is different than
@@ -281,6 +629,7 @@ WarpX::Evolve (int numsteps)
             ExecutePythonCallback("beforecollisions");
             mypc->doCollisions(step, cur_time, dt[0]);
             ExecutePythonCallback("aftercollisions");
+            DsmcInvalidParticleDiag(mypc, "aftercollisions", step);
         }
 
         // Field solve step for electrostatic or hybrid-PIC solvers
@@ -418,6 +767,7 @@ void WarpX::OneStep (
                 ExecutePythonCallback("beforecollisions");
                 mypc->doCollisions(a_step, a_cur_time, a_dt);
                 ExecutePythonCallback("aftercollisions");
+                DsmcInvalidParticleDiag(mypc, "aftercollisions", a_step);
 
                 // push particles (full position and half momentum)
                 PushParticlesandDeposit(
@@ -433,6 +783,7 @@ void WarpX::OneStep (
                 ExecutePythonCallback("beforecollisions");
                 mypc->doCollisions(a_step, a_cur_time, a_dt);
                 ExecutePythonCallback("aftercollisions");
+                DsmcInvalidParticleDiag(mypc, "aftercollisions", a_step);
 
                 // push particles (full position and full momentum)
                 PushParticlesandDeposit(
@@ -462,6 +813,7 @@ void WarpX::OneStep (
                     ExecutePythonCallback("beforecollisions");
                     mypc->doCollisions(a_step, a_cur_time, a_dt);
                     ExecutePythonCallback("aftercollisions");
+                    DsmcInvalidParticleDiag(mypc, "aftercollisions", a_step);
 
                     OneStep_JRhom(a_cur_time);
                 }
@@ -487,6 +839,7 @@ void WarpX::OneStep (
                     ExecutePythonCallback("beforecollisions");
                     mypc->doCollisions(a_step, a_cur_time, a_dt);
                     ExecutePythonCallback("aftercollisions");
+                    DsmcInvalidParticleDiag(mypc, "aftercollisions", a_step);
 
                     OneStep_sub1(a_cur_time);
                 }
@@ -530,6 +883,7 @@ WarpX::OneStep_nosub (
         ExecutePythonCallback("beforecollisions");
         mypc->doCollisions(a_step, a_cur_time, a_dt);
         ExecutePythonCallback("aftercollisions");
+        DsmcInvalidParticleDiag(mypc, "aftercollisions", a_step);
 
         // push particles (full position and half momentum)
         PushParticlesandDeposit(
@@ -544,6 +898,7 @@ WarpX::OneStep_nosub (
         ExecutePythonCallback("beforecollisions");
         mypc->doCollisions(a_step, a_cur_time, a_dt);
         ExecutePythonCallback("aftercollisions");
+        DsmcInvalidParticleDiag(mypc, "aftercollisions", a_step);
 
         // push particles (full position and full momentum)
         PushParticlesandDeposit(
@@ -717,6 +1072,7 @@ void WarpX::HandleParticlesAtBoundaries (int step, amrex::Real cur_time, int num
 
     mypc->ApplyBoundaryConditions();
     m_particle_boundary_buffer->gatherParticlesFromDomainBoundaries(*mypc, cur_time);
+    DsmcInvalidParticleDiag(mypc, "before_boundary_redistribute", step);
 
     // Non-Maxwell solver: particles can move by an arbitrary number of cells
     if( electromagnetic_solver_id == ElectromagneticSolverAlgo::None ||

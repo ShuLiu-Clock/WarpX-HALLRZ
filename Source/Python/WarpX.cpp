@@ -108,7 +108,7 @@ void init_WarpX (py::module& m)
     m.def("finalize", &WarpX::Finalize,
         "Close out the WarpX related data");
 
-    py::class_<WarpX> warpx(m, "WarpX");
+    py::class_<WarpX, std::unique_ptr<WarpX, py::nodelete>> warpx(m, "WarpX");
     warpx
         // WarpX is a Singleton Class with a private constructor
         //   https://github.com/BLAST-WarpX/warpx/pull/4104

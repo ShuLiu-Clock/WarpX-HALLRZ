@@ -1371,6 +1371,13 @@ private:
     amrex::RealVect fine_tag_hi;
     //! User-defined parser to define refinement patches
     std::unique_ptr<amrex::Parser> ref_patch_parser;
+    //! HallRZ static three-level rectangular AMR tagging parameters.
+    bool m_hall_rz_amr_enabled = false;
+    amrex::Real m_hall_rz_amr_r1 = 0.0;
+    amrex::Real m_hall_rz_amr_z1 = 0.0;
+    amrex::Real m_hall_rz_amr_r2 = 0.0;
+    amrex::Real m_hall_rz_amr_z2 = 0.0;
+    amrex::Vector<int> m_hall_rz_max_coarsening_levels;
 
     bool m_is_synchronized = true;
 

@@ -2138,6 +2138,21 @@ class ElectrostaticSolver(picmistandard.PICMI_ElectrostaticSolver):
     warpx_max_dt: float, optional
         The maximum allowable timestep when `warpx_dt_update_interval > 0`.
 
+    warpx_hall_rz_enable: bool, optional
+        Enable the HallRZ Poisson path from the PICMI electrostatic solver.
+
+    warpx_hall_rz_lob, warpx_hall_rz_hib, warpx_hall_rz_out: float, optional
+        HallRZ channel geometry parameters. These are required when
+        `warpx_hall_rz_enable=True`.
+
+    warpx_hall_rz_bc_lo_r: {"auto", "axis", "dirichlet", "neumann", "robin"}, optional
+        HallRZ lower-r Poisson boundary condition. `axis` is only valid at
+        `rmin=0`; `dirichlet`, `neumann`, and `robin` are valid for `rmin>0`.
+
+    warpx_hall_rz_potential_lo_r: float, optional
+        Scalar r-lo Dirichlet potential for HallRZ. If omitted, the grid
+        `warpx_potential_lo_r` value is reused when present.
+
     """
 
     def init(self, kw):
@@ -2167,12 +2182,93 @@ class ElectrostaticSolver(picmistandard.PICMI_ElectrostaticSolver):
         self.cfl = kw.pop("warpx_cfl", None)
         self.dt_update_interval = kw.pop("warpx_dt_update_interval", None)
         self.max_dt = kw.pop("warpx_max_dt", None)
+        self.hall_rz_enable = kw.pop("warpx_hall_rz_enable", None)
+        hall_rz_names = (
+            "lob",
+            "hib",
+            "out",
+            "align_tol",
+            "verbose",
+            "diag_interval",
+            "max_iter",
+            "rel_tol",
+            "abs_tol",
+            "max_coarsening_level",
+            "max_coarsening_levels",
+            "amr_enable",
+            "amr_r1",
+            "amr_z1",
+            "amr_r2",
+            "amr_z2",
+            "static_rho_test",
+            "static_rho_mode",
+            "static_rho_amp",
+            "static_rho_lambda_r",
+            "static_rho_lambda_z",
+            "particle_diag",
+            "particle_diag_interval",
+            "eb_bc_mode",
+            "eb_wall_flux",
+            "eb_g0",
+            "eb_wall_flux_segment",
+            "bc_lo_r",
+            "potential_lo_r",
+            "robin_lo_r_a",
+            "robin_lo_r_b",
+            "robin_lo_r_f",
+        )
+        self.hall_rz_options = {
+            name: kw.pop(f"warpx_hall_rz_{name}", None) for name in hall_rz_names
+        }
+
+    def _hall_rz_requested(self):
+        if self.hall_rz_enable is not None:
+            return bool(self.hall_rz_enable)
+        return any(value is not None for value in self.hall_rz_options.values())
+
+    def _initialize_hall_rz_inputs(self):
+        if not self._hall_rz_requested():
+            return
+
+        if str(self.method).lower() != "multigrid":
+            raise ValueError(
+                "HallRZ Poisson requires picmi.ElectrostaticSolver(method='Multigrid')"
+            )
+
+        missing = [
+            name
+            for name in ("lob", "hib", "out")
+            if self.hall_rz_options[name] is None
+        ]
+        if missing:
+            raise ValueError(
+                "HallRZ Poisson requires solver kwargs: "
+                + ", ".join(f"warpx_hall_rz_{name}" for name in missing)
+            )
+
+        options = dict(self.hall_rz_options)
+        if options["rel_tol"] is None:
+            options["rel_tol"] = self.required_precision
+        if options["abs_tol"] is None:
+            options["abs_tol"] = self.absolute_tolerance
+        if options["max_iter"] is None:
+            options["max_iter"] = self.maximum_iterations
+        if options["verbose"] is None:
+            options["verbose"] = self.self_fields_verbosity
+        if options["potential_lo_r"] is None:
+            options["potential_lo_r"] = getattr(self.grid, "potential_xmin", None)
+
+        pywarpx.warpx.hall_rz_enable = 1
+        for name, value in options.items():
+            if value is not None:
+                setattr(pywarpx.warpx, f"hall_rz_{name}", value)
 
     def solver_initialize_inputs(self):
         # Open BC means FieldBoundaryType::Open for electrostatic sims, rather than perfectly-matched layer
         BC_map["open"] = "open"
 
         self.grid.grid_initialize_inputs()
+        self._initialize_hall_rz_inputs()
 
         # set adaptive timestepping parameters
         pywarpx.warpx.cfl = self.cfl

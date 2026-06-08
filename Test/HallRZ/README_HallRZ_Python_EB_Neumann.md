@@ -26,6 +26,14 @@ hallrz.set_robin_rhi(a, b, f)
 hallrz.clear_robin_rhi()
 hallrz.has_robin_rhi()
 
+hallrz.set_robin_rlo(a, b, f)
+hallrz.clear_robin_rlo()
+hallrz.has_robin_rlo()
+
+hallrz.set_dirichlet_rlo(phi)
+hallrz.clear_dirichlet_rlo()
+hallrz.has_dirichlet_rlo()
+
 hallrz.set_inlet_dirichlet(phi)
 hallrz.clear_inlet_dirichlet()
 hallrz.has_inlet_dirichlet()
@@ -69,6 +77,8 @@ sim.initialize_inputs()
 hallrz.set_eb_neumann(g_eb_2d)
 hallrz.set_robin_zhi(a_zhi, b_zhi, f_zhi)
 hallrz.set_robin_rhi(a_rhi, b_rhi, f_rhi)
+hallrz.set_robin_rlo(a_rlo, b_rlo, f_rlo)      # optional, only for rmin > 0
+hallrz.set_dirichlet_rlo(phi_rlo)              # optional, only for rmin > 0
 hallrz.set_inlet_dirichlet(phi_inlet)
 sim.initialize_warpx()
 sim.step(...)
@@ -120,6 +130,23 @@ C++ only uses r-hi Python data on active Hall plume boundary nodes.  Inactive
 covered-side r-hi nodes keep the default harmless Robin data so AMReX face
 validation remains well-defined.
 
+`r-lo` Robin, valid only for `rmin > 0`:
+
+```text
+a_rlo.shape = b_rlo.shape = f_rlo.shape = (Nz+1,)
+a*phi + b*dphi/dn = f at r=rmin, n = -r
+```
+
+`r-lo` Dirichlet, valid only for `rmin > 0`:
+
+```text
+phi_rlo.shape = (Nz+1,)
+phi = phi_rlo at r=rmin
+```
+
+At `rmin=0`, the lower radial face is the RZ axis and only homogeneous
+Neumann/axis symmetry is supported.
+
 `z-lo` inlet Dirichlet:
 
 ```text
@@ -145,6 +172,35 @@ Each face is managed independently:
 set_*   -> persistent until overwritten or cleared
 clear_* -> return that face to the scalar/default path
 ```
+
+## PICMI Solver Parameters
+
+HallRZ scalar setup can be attached directly to the PICMI electrostatic solver:
+
+```python
+solver = picmi.ElectrostaticSolver(
+    grid=grid,
+    method="Multigrid",
+    required_precision=1.0e-6,
+    warpx_hall_rz_enable=True,
+    warpx_hall_rz_lob=lob,
+    warpx_hall_rz_hib=hib,
+    warpx_hall_rz_out=out,
+    warpx_hall_rz_bc_lo_r="dirichlet",  # auto, axis, dirichlet, neumann, robin
+    warpx_hall_rz_potential_lo_r=0.0,
+)
+```
+
+For `rmin > 0`, supported lo-r Poisson BCs are:
+
+```text
+dirichlet: scalar value from warpx_hall_rz_potential_lo_r or grid warpx_potential_lo_r
+neumann:   homogeneous dphi/dn = 0
+robin:     scalar a,b,f from warpx_hall_rz_robin_lo_r_a/b/f
+```
+
+Use `hallrz.set_robin_rlo(...)` or `hallrz.set_dirichlet_rlo(...)` after
+`sim.initialize_inputs()` when the lo-r data must vary along z.
 
 ## Mutual Exclusion
 
@@ -195,6 +251,19 @@ Clear behavior:
 ```bash
 python3 Test/HallRZ/picmi_hall_rz_core_smoke.py \
   --max-steps 20 --python-eb-g0 1.0 --python-eb-clear-after 10
+```
+
+Aligned `rmin > 0` lower-r boundary checks:
+
+```bash
+python3 Test/HallRZ/picmi_hall_rz_core_smoke.py \
+  --max-steps 1 --rmin 0.02 --rlo-bc dirichlet
+
+python3 Test/HallRZ/picmi_hall_rz_core_smoke.py \
+  --max-steps 1 --rmin 0.02 --rlo-bc neumann
+
+python3 Test/HallRZ/picmi_hall_rz_core_smoke.py \
+  --max-steps 1 --rmin 0.02 --rlo-bc robin
 ```
 
 ## Current Validation
